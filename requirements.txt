@@ -2,6 +2,5 @@ streamlit
 pandas
 fpdf2
 openai
-google-genai
 pillow
 python-dotenv

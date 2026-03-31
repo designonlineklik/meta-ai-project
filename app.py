@@ -10,8 +10,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from openai import OpenAI
-from google import genai
-from google.genai import types as genai_types
 from fpdf import FPDF
 
 from main import (
@@ -235,18 +233,11 @@ with st.sidebar:
             type="password",
             help="Jouw sleutel wordt niet opgeslagen buiten deze sessie.",
         )
-        gemini_key = st.text_input(
-            "Gemini API-sleutel",
-            value=os.getenv("GEMINI_API_KEY", ""),
-            type="password",
-            help="Gebruikt voor het genereren van visuele prompts per concept.",
-        )
-        st.caption("Sleutels zijn alleen actief tijdens deze sessie.")
+        st.caption("Sleutel is alleen actief tijdens deze sessie.")
         st.caption(
-            "☁️ **Cloud-deployment:** stel sleutels in als omgevingsvariabelen via het "
+            "☁️ **Cloud-deployment:** stel de sleutel in als omgevingsvariabele via het "
             "Streamlit Cloud dashboard (App settings → Secrets) of het Vercel dashboard "
-            "(Settings → Environment Variables) onder de namen "
-            "`OPENAI_API_KEY` en `GEMINI_API_KEY`."
+            "(Settings → Environment Variables) onder de naam `OPENAI_API_KEY`."
         )
 
 # ---------------------------------------------------------------------------
@@ -492,78 +483,14 @@ def compare_creatives(
     return response.choices[0].message.content
 
 
-GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
-GEMINI_TEXT_MODEL  = "gemini-1.5-flash"
-
-
-def generate_visual_image(
-    concept: Dict, gemini_api_key: str, text_only: bool = False
-) -> Tuple[Optional[bytes], str]:
-    """
-    Generates a banner image using the Gemini image model (response_modalities=IMAGE).
-    Falls back to a detailed Midjourney/DALL-E text prompt via gemini-1.5-flash.
-    Returns (image_bytes_or_None, prompt_text).
-
-    When text_only=True the image generation API is skipped entirely; only the
-    Midjourney/DALL-E text prompt is generated (used for Middel/Laag priority).
-    """
-    client_g = genai.Client(api_key=gemini_api_key)
-
-    image_prompt = (
-        f"Professional Meta advertisement banner for a jewelry brand. "
-        f"Concept: {concept.get('titel', '')}. "
-        f"Visual direction: {concept.get('visuele_omschrijving', '')}. "
-        f"Hook text: '{concept.get('hook', '')}'. "
-        f"Headline: '{concept.get('headline', '')}'. "
-        f"Style: elegant commercial jewelry photography, soft pastel tones, "
-        f"sophisticated lifestyle aesthetic, high-end fashion editorial quality. "
-        f"Square 1:1 format suitable for Facebook and Instagram. "
-        f"No watermarks, no text overlays."
-    )
-
-    # Attempt 1: real image generation — only for Hoog priority
-    if not text_only:
-        try:
-            response = client_g.models.generate_content(
-                model=GEMINI_IMAGE_MODEL,
-                contents=image_prompt,
-                config=genai_types.GenerateContentConfig(
-                    response_modalities=["IMAGE", "TEXT"],
-                ),
-            )
-            for part in response.candidates[0].content.parts:
-                if part.inline_data is not None:
-                    return part.inline_data.data, image_prompt
-        except Exception:
-            pass
-
-    # Fallback: detailed text prompt via gemini-1.5-flash
-    try:
-        fallback = client_g.models.generate_content(
-            model=GEMINI_TEXT_MODEL,
-            contents=(
-                f"Write a detailed Midjourney/DALL-E image generation prompt for this jewelry "
-                f"ad concept.\n\n"
-                f"Concept: {concept.get('titel', '')}\n"
-                f"Hook: {concept.get('hook', '')}\n"
-                f"Headline: {concept.get('headline', '')}\n"
-                f"Visual direction: {concept.get('visuele_omschrijving', '')}\n\n"
-                "Include: subject and composition, lighting and mood, colour palette, "
-                "style reference (commercial product photography / editorial fashion), "
-                "camera and lens, aspect ratio, negative prompt. "
-                "Return only the prompt — no introduction, no explanation."
-            ),
-        )
-        return None, fallback.text
-    except Exception as e:
-        return None, f"_(Beeldprompt kon niet worden gegenereerd: {e})_"
 
 
 def generate_concepts(client: OpenAI, analysis_report: str) -> List[Dict]:
     """
     Returns a list of concept dicts with keys:
     nummer, titel, prioriteit, verwachte_impact,
-    hook, primary_text, headline, visuele_omschrijving
+    hook, primary_text, headline, visuele_omschrijving,
+    master_prompt, design_strategy
     """
     system_msg = (
         "Je bent een senior copywriter en creatief directeur voor een high-end Nederlandse sieraden-"
@@ -600,12 +527,24 @@ def generate_concepts(client: OpenAI, analysis_report: str) -> List[Dict]:
         "- headline (string): klik-trigger, max. 8 woorden\n"
         "- visuele_omschrijving (string): volledige art direction briefing voor de ontwerper — "
         "hero-afbeelding, model (uitdrukking, houding, demografisch profiel), productplaatsing, "
-        "kleurenpalet, typografiestijl, sfeer, grafische elementen, beeldverhouding\n\n"
+        "kleurenpalet, typografiestijl, sfeer, grafische elementen, beeldverhouding\n"
+        "- master_prompt (string): een gedetailleerde, gebruiksklare prompt voor Freepik of Nano Banana Pro. "
+        "VERPLICHT: de prompt bevat ALTIJD de exacte zin 'Integrated with the product in the provided image'. "
+        "De prompt is in het Engels en dekt verplicht: "
+        "(1) Lighting — omschrijf het type licht (natural window light, soft studio diffused, golden hour, etc.), "
+        "(2) Camera angle — benoem het type opname (close-up, hero shot, lifestyle wide, flat lay, over-the-shoulder), "
+        "(3) Composition — geef de beeldopbouw aan (rule of thirds, centered product, negative space, layered depth), "
+        "(4) Online Klik aesthetic — clean, professional, conversion-focused, minimalist luxury. "
+        "Als het concept product-gericht is: benadruk productdetails, textuur en materiaal. "
+        "Als het concept service- of sfeer-gericht is: focus op menselijke interactie en emotie, maar vermeld altijd product- of logo-context. "
+        "Sluit af met: aspect ratio 1:1, no text overlays, no watermarks.\n"
+        "- design_strategy (string): 1-2 zinnen in het Nederlands die uitleggen waarom juist deze visuele richting "
+        "gekozen is op basis van de top-presterende advertenties in de analyse.\n\n"
         "Extra regels:\n"
         "- Bouw voort op de winnende patronen: dubbel aanbod, elegante close-ups, aspirationeel model.\n"
         "- Varieer de haakjes: nieuwsgierigheid, social proof, urgentie, storytelling, voordeel.\n"
         "- Elk concept voelt uniek aan — geen herhalingen in toon of structuur.\n"
-        "- Alle tekstvelden in het Nederlands.\n"
+        "- Alle tekstvelden behalve master_prompt in het Nederlands.\n"
         "- Retourneer ALLEEN het JSON-object, geen extra tekst."
     )
     response = client.chat.completions.create(
@@ -614,7 +553,7 @@ def generate_concepts(client: OpenAI, analysis_report: str) -> List[Dict]:
             {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=4500,
+        max_tokens=6000,
         response_format={"type": "json_object"},
     )
     raw = response.choices[0].message.content
@@ -824,6 +763,30 @@ def generate_pdf(
                 pdf.set_text_color(20, 20, 20)
                 pdf.multi_cell(val_w, 5, safe_pdf_text(str(c.get(field_key, "-"))))
 
+            # Design Strategy
+            design_strategy = c.get("design_strategy", "")
+            if design_strategy:
+                pdf.set_x(_PDF_MARGIN)
+                pdf.set_font("Helvetica", "B", 9)
+                pdf.set_text_color(0, 87, 60)
+                pdf.cell(_PDF_LABEL_W, 5, "Design Strategy:", ln=False)
+                pdf.set_font("Helvetica", "I", 9)
+                pdf.set_text_color(20, 20, 20)
+                pdf.multi_cell(val_w, 5, safe_pdf_text(design_strategy))
+
+            # Master Prompt
+            master_prompt = c.get("master_prompt", "")
+            if master_prompt:
+                pdf.set_x(_PDF_MARGIN)
+                pdf.set_font("Helvetica", "B", 9)
+                pdf.set_text_color(0, 87, 60)
+                pdf.cell(pdf.epw, 5, "Master Prompt (Freepik / Nano Banana Pro):", ln=True)
+                pdf.set_x(_PDF_MARGIN)
+                pdf.set_fill_color(245, 250, 247)
+                pdf.set_font("Courier", "", 8)
+                pdf.set_text_color(20, 20, 20)
+                pdf.multi_cell(pdf.epw, 4.5, safe_pdf_text(master_prompt), fill=True)
+
             pdf.ln(2)
             pdf.set_draw_color(210, 210, 210)
             lx = _PDF_MARGIN
@@ -996,42 +959,6 @@ if start_btn:
                 st.warning(f"Kon concepten niet genereren: {e}")
         results["concepts"] = concepts
 
-        # Stap 5: Gemini — alleen afbeelding genereren voor Hoog prioriteit
-        # Middel/Laag: alleen tekst-prompt ophalen (geen image API-call)
-        if concepts and gemini_key:
-            hoog = [c for c in concepts if c.get("prioriteit") == "Hoog"]
-            overig = [c for c in concepts if c.get("prioriteit") != "Hoog"]
-
-            if hoog:
-                progress_g = st.progress(0, text="Gemini genereert visuals voor hoge prioriteit...")
-                for i, concept in enumerate(hoog):
-                    progress_g.progress(
-                        (i + 1) / len(hoog),
-                        text=f"Gemini visual {concept.get('nummer', i + 1)} / {len(hoog)}...",
-                    )
-                    img_bytes, prompt_text = generate_visual_image(concept, gemini_key, text_only=False)
-                    concept["visuele_afbeelding"] = img_bytes
-                    concept["visuele_prompt"] = prompt_text
-                progress_g.empty()
-
-            # Middel/Laag: text prompt only, no image generation
-            if overig:
-                progress_t = st.progress(0, text="Beeldprompts genereren voor overige concepten...")
-                for i, concept in enumerate(overig):
-                    progress_t.progress(
-                        (i + 1) / len(overig),
-                        text=f"Tekstprompt concept {concept.get('nummer', i + 1)}...",
-                    )
-                    _, prompt_text = generate_visual_image(concept, gemini_key, text_only=True)
-                    concept["visuele_afbeelding"] = None
-                    concept["visuele_prompt"] = prompt_text
-                progress_t.empty()
-
-        elif concepts:
-            for concept in concepts:
-                concept["visuele_afbeelding"] = None
-                concept["visuele_prompt"] = ""
-
         concepts_md_lines = [
             "# Creatieve Briefings — Nieuwe Advertentieconcepten",
             f"_Gegenereerd: {datetime.now().strftime('%Y-%m-%d %H:%M')}_",
@@ -1052,6 +979,14 @@ if start_btn:
                 f"**Headline:** {c.get('headline', '—')}",
                 "",
                 f"**Visuele Omschrijving:** {c.get('visuele_omschrijving', '—')}",
+                "",
+                f"**Design Strategy:** {c.get('design_strategy', '—')}",
+                "",
+                "**Master Prompt (Freepik / Nano Banana Pro):**",
+                "",
+                f"```",
+                c.get('master_prompt', '—'),
+                f"```",
                 "",
             ]
         results["concepts_md"] = "\n".join(concepts_md_lines)
@@ -1402,28 +1337,27 @@ if "results" in st.session_state:
                             unsafe_allow_html=True,
                         )
 
-                    # Gemini visual — full width below the two columns
-                    img_bytes     = concept.get("visuele_afbeelding")
-                    visuele_prompt = concept.get("visuele_prompt", "")
+                    # Master Prompt — full width below the two columns
+                    master_prompt   = concept.get("master_prompt", "")
+                    design_strategy = concept.get("design_strategy", "")
 
-                    if img_bytes:
+                    st.markdown(
+                        "<div style='margin-top:16px;margin-bottom:4px'>"
+                        "<span style='font-size:0.82rem;font-weight:700;color:#00573C;"
+                        "letter-spacing:0.04em'>🎨 Visueel Concept &amp; Master Prompt</span>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+                    if design_strategy:
                         st.markdown(
-                            "<div style='margin-top:14px;margin-bottom:4px'>"
-                            "<span style='font-size:0.75rem;font-weight:700;color:#00573C;"
-                            "letter-spacing:0.06em;text-transform:uppercase'>"
-                            "🤖 Gemini — Gegenereerde Visual</span></div>",
+                            f"<div style='background:#edfaf3;border-left:4px solid #33B784;"
+                            f"padding:8px 14px;border-radius:4px;margin-bottom:8px;"
+                            f"font-size:0.88rem;color:#1a3a2a'>"
+                            f"<strong>Design Strategy:</strong> {design_strategy}</div>",
                             unsafe_allow_html=True,
                         )
-                        st.image(img_bytes, use_container_width=True)
-                    elif visuele_prompt:
-                        st.markdown(
-                            "<div style='margin-top:14px;margin-bottom:4px'>"
-                            "<span style='font-size:0.75rem;font-weight:700;color:#00573C;"
-                            "letter-spacing:0.06em;text-transform:uppercase'>"
-                            "🤖 Gemini — Beeldgeneratieprompt (Midjourney / DALL-E)</span></div>",
-                            unsafe_allow_html=True,
-                        )
-                        st.code(visuele_prompt, language=None)
+                    if master_prompt:
+                        st.code(master_prompt, language=None)
 
             st.divider()
             st.download_button(
