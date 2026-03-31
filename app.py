@@ -226,6 +226,19 @@ with st.sidebar:
         "de winnende patronen."
     )
     st.divider()
+    with st.expander("💡 Hoe te gebruiken", expanded=False):
+        st.markdown(
+            "**Master Prompt gebruiken:**\n\n"
+            "1. Ga naar **Tab 3 → Creatieve Briefings**\n"
+            "2. Kijk bij elk concept welke **referentie-afbeelding** de AI aanbeveelt\n"
+            "3. Kopieer de **Master Prompt** met één klik\n"
+            "4. Ga naar **[Nano Banana Pro](https://nanobananap.ro)** of **[Freepik](https://freepik.com)**\n"
+            "5. Upload de aangegeven referentie-afbeelding\n"
+            "6. Plak de prompt en genereer je visual\n\n"
+            "_De prompt zorgt er automatisch voor dat het product "
+            "geïntegreerd wordt in de nieuwe banner._"
+        )
+    st.divider()
     with st.expander("🛠️ Developer Settings", expanded=False):
         api_key = st.text_input(
             "OpenAI API-sleutel",
@@ -485,13 +498,23 @@ def compare_creatives(
 
 
 
-def generate_concepts(client: OpenAI, analysis_report: str) -> List[Dict]:
+def generate_concepts(
+    client: OpenAI, analysis_report: str, image_filenames: Optional[List[str]] = None
+) -> List[Dict]:
     """
     Returns a list of concept dicts with keys:
     nummer, titel, prioriteit, verwachte_impact,
     hook, primary_text, headline, visuele_omschrijving,
-    master_prompt, design_strategy
+    referentie_afbeelding, master_prompt, design_strategy
     """
+    image_filenames = image_filenames or []
+    filenames_block = (
+        "Beschikbare referentie-afbeeldingen (exacte bestandsnamen):\n"
+        + "\n".join(f"  - {fn}" for fn in image_filenames)
+        if image_filenames
+        else "Geen afbeeldingen geüpload."
+    )
+
     system_msg = (
         "Je bent een senior copywriter en creatief directeur voor een high-end Nederlandse sieraden-"
         "webshop. Je schrijft Instagram-waardige advertentieteksten: pakkend, menselijk, direct. "
@@ -500,6 +523,7 @@ def generate_concepts(client: OpenAI, analysis_report: str) -> List[Dict]:
     prompt = (
         "Hieronder staat een visueel analyserapport van een 'Summer Sale'-campagne.\n\n"
         f"---\n{analysis_report}\n---\n\n"
+        f"{filenames_block}\n\n"
         "Genereer op basis van de winnende patronen 10 nieuwe Meta-advertentieconcepten.\n\n"
 
         "COPYWRITING-STIJLGIDS — volg dit strikt:\n"
@@ -528,15 +552,23 @@ def generate_concepts(client: OpenAI, analysis_report: str) -> List[Dict]:
         "- visuele_omschrijving (string): volledige art direction briefing voor de ontwerper — "
         "hero-afbeelding, model (uitdrukking, houding, demografisch profiel), productplaatsing, "
         "kleurenpalet, typografiestijl, sfeer, grafische elementen, beeldverhouding\n"
+        "- referentie_afbeelding (string): kies de EXACTE bestandsnaam (uit de lijst hierboven) die het beste "
+        "past als product-referentie voor dit concept. "
+        "Als het concept product-gericht is, kies de meest passende afbeelding. "
+        "Als het concept service- of sfeer-gericht is zonder duidelijk product, gebruik de waarde 'geen'.\n"
         "- master_prompt (string): een gedetailleerde, gebruiksklare prompt voor Freepik of Nano Banana Pro. "
-        "VERPLICHT: de prompt bevat ALTIJD de exacte zin 'Integrated with the product in the provided image'. "
         "De prompt is in het Engels en dekt verplicht: "
         "(1) Lighting — omschrijf het type licht (natural window light, soft studio diffused, golden hour, etc.), "
         "(2) Camera angle — benoem het type opname (close-up, hero shot, lifestyle wide, flat lay, over-the-shoulder), "
         "(3) Composition — geef de beeldopbouw aan (rule of thirds, centered product, negative space, layered depth), "
         "(4) Online Klik aesthetic — clean, professional, conversion-focused, minimalist luxury. "
+        "VERPLICHT: als referentie_afbeelding een bestandsnaam is (niet 'geen'), bevat de prompt de exacte zin "
+        "'Integrated with the product and style from [BESTANDSNAAM]' waarbij [BESTANDSNAAM] de waarde van "
+        "referentie_afbeelding is. "
+        "Als referentie_afbeelding 'geen' is, schrijf in plaats daarvan: "
+        "'No specific product reference needed — focus on the vibe and human interaction described in the briefing.' "
         "Als het concept product-gericht is: benadruk productdetails, textuur en materiaal. "
-        "Als het concept service- of sfeer-gericht is: focus op menselijke interactie en emotie, maar vermeld altijd product- of logo-context. "
+        "Als het concept service- of sfeer-gericht is: focus op menselijke interactie en emotie. "
         "Sluit af met: aspect ratio 1:1, no text overlays, no watermarks.\n"
         "- design_strategy (string): 1-2 zinnen in het Nederlands die uitleggen waarom juist deze visuele richting "
         "gekozen is op basis van de top-presterende advertenties in de analyse.\n\n"
@@ -763,6 +795,18 @@ def generate_pdf(
                 pdf.set_text_color(20, 20, 20)
                 pdf.multi_cell(val_w, 5, safe_pdf_text(str(c.get(field_key, "-"))))
 
+            # Referentie-afbeelding
+            ref_afb = c.get("referentie_afbeelding", "")
+            if ref_afb:
+                pdf.set_x(_PDF_MARGIN)
+                pdf.set_font("Helvetica", "B", 9)
+                pdf.set_text_color(0, 87, 60)
+                pdf.cell(_PDF_LABEL_W, 5, "Referentie-afbeelding:", ln=False)
+                pdf.set_font("Helvetica", "", 9)
+                pdf.set_text_color(20, 20, 20)
+                ref_display = "Geen product-referentie" if ref_afb.lower() == "geen" else ref_afb
+                pdf.multi_cell(val_w, 5, safe_pdf_text(ref_display))
+
             # Design Strategy
             design_strategy = c.get("design_strategy", "")
             if design_strategy:
@@ -927,6 +971,14 @@ if start_btn:
         results["match_count"] = matched_count
         results["total_images"] = len(uploaded_images) if uploaded_images else 0
 
+        # Build a filename → bytes map so Tab 3 can render thumbnails
+        image_bytes_map: Dict[str, bytes] = {}
+        if uploaded_images:
+            for img_file in uploaded_images:
+                img_file.seek(0)
+                image_bytes_map[img_file.name] = img_file.read()
+        results["image_bytes_map"] = image_bytes_map
+
         # Stap 3: Strategische vergelijking
         high   = [a for a in analysed if a["category"] == "High Performer"]
         avg    = [a for a in analysed if a["category"] == "Average"]
@@ -952,9 +1004,10 @@ if start_btn:
 
         # Stap 4: Concepten genereren
         concepts: List[Dict] = []
+        img_filenames = [a["filename"] for a in analysed] if analysed else []
         with st.spinner("Krachten bundelen... Wij vertalen jouw data naar groei-kansen."):
             try:
-                concepts = generate_concepts(client, full_report)
+                concepts = generate_concepts(client, full_report, img_filenames)
             except Exception as e:
                 st.warning(f"Kon concepten niet genereren: {e}")
         results["concepts"] = concepts
@@ -979,6 +1032,8 @@ if start_btn:
                 f"**Headline:** {c.get('headline', '—')}",
                 "",
                 f"**Visuele Omschrijving:** {c.get('visuele_omschrijving', '—')}",
+                "",
+                f"**Referentie-afbeelding:** {c.get('referentie_afbeelding', '—')}",
                 "",
                 f"**Design Strategy:** {c.get('design_strategy', '—')}",
                 "",
@@ -1010,6 +1065,7 @@ if "results" in st.session_state:
     metric_used: str = r["metric_used"]
     analysed: List[Dict] = r["analysed"]
     concepts: List[Dict] = r.get("concepts", [])
+    image_bytes_map: Dict[str, bytes] = r.get("image_bytes_map", {})
 
     st.success("✅ Analyse voltooid!")
 
@@ -1337,17 +1393,46 @@ if "results" in st.session_state:
                             unsafe_allow_html=True,
                         )
 
-                    # Master Prompt — full width below the two columns
-                    master_prompt   = concept.get("master_prompt", "")
-                    design_strategy = concept.get("design_strategy", "")
+                    # Master Prompt section — full width below the two columns
+                    master_prompt        = concept.get("master_prompt", "")
+                    design_strategy      = concept.get("design_strategy", "")
+                    ref_img              = concept.get("referentie_afbeelding", "")
+                    ref_is_file          = ref_img and ref_img.lower() != "geen"
 
                     st.markdown(
-                        "<div style='margin-top:16px;margin-bottom:4px'>"
+                        "<div style='margin-top:16px;margin-bottom:6px'>"
                         "<span style='font-size:0.82rem;font-weight:700;color:#00573C;"
                         "letter-spacing:0.04em'>🎨 Visueel Concept &amp; Master Prompt</span>"
                         "</div>",
                         unsafe_allow_html=True,
                     )
+
+                    # Reference image badge + thumbnail
+                    if ref_is_file:
+                        ref_col, thumb_col = st.columns([3, 1])
+                        with ref_col:
+                            st.markdown(
+                                f"<div style='background:#fff3cd;border:1px solid #ffc107;"
+                                f"border-radius:8px;padding:8px 14px;margin-bottom:8px;"
+                                f"font-size:0.88rem'>"
+                                f"🖼️ <strong>Referentie-afbeelding:</strong> "
+                                f"<code>{ref_img}</code></div>",
+                                unsafe_allow_html=True,
+                            )
+                        with thumb_col:
+                            thumb_bytes = image_bytes_map.get(ref_img)
+                            if thumb_bytes:
+                                st.image(thumb_bytes, width=100)
+                    elif ref_img:
+                        st.markdown(
+                            "<div style='background:#f8f9fa;border:1px solid #dee2e6;"
+                            "border-radius:8px;padding:8px 14px;margin-bottom:8px;"
+                            "font-size:0.88rem;color:#6c757d'>"
+                            "🖼️ <em>Geen specifieke product-referentie nodig — "
+                            "focus op de vibe van de briefing.</em></div>",
+                            unsafe_allow_html=True,
+                        )
+
                     if design_strategy:
                         st.markdown(
                             f"<div style='background:#edfaf3;border-left:4px solid #33B784;"
