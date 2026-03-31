@@ -31,9 +31,10 @@ CATEGORY_NL = {
 }
 
 PRIORITY_COLOURS = {
-    "Hoog":   ("#dc3545", "#fff"),
-    "Middel": ("#fd7e14", "#fff"),
-    "Laag":   ("#6c757d", "#fff"),
+    # (background, text, label)
+    "Hoog":   ("#e63946", "#fff", "Must-test"),
+    "Middel": ("#1d6fa5", "#fff", "Strong contender"),
+    "Laag":   ("#6c757d", "#fff", "Experimental"),
 }
 
 colours_map = {
@@ -232,7 +233,7 @@ with st.sidebar:
             "1. Ga naar **Tab 3 → Creatieve Briefings**\n"
             "2. Kijk bij elk concept welke **referentie-afbeelding** de AI aanbeveelt\n"
             "3. Kopieer de **Master Prompt** met één klik\n"
-            "4. Ga naar **[Nano Banana Pro](https://nanobananap.ro)** of **[Freepik](https://freepik.com)**\n"
+            "4. Ga naar **[Nano Banana Pro](https://gemini.google.com/app)** of **[Freepik](https://freepik.com)**\n"
             "5. Upload de aangegeven referentie-afbeelding\n"
             "6. Plak de prompt en genereer je visual\n\n"
             "_De prompt zorgt er automatisch voor dat het product "
@@ -562,10 +563,14 @@ def generate_concepts(
         "(2) Camera angle — benoem het type opname (close-up, hero shot, lifestyle wide, flat lay, over-the-shoulder), "
         "(3) Composition — geef de beeldopbouw aan (rule of thirds, centered product, negative space, layered depth), "
         "(4) Online Klik aesthetic — clean, professional, conversion-focused, minimalist luxury. "
-        "VERPLICHT: als referentie_afbeelding een bestandsnaam is (niet 'geen'), bevat de prompt de exacte zin "
-        "'Integrated with the product and style from [BESTANDSNAAM]' waarbij [BESTANDSNAAM] de waarde van "
-        "referentie_afbeelding is. "
-        "Als referentie_afbeelding 'geen' is, schrijf in plaats daarvan: "
+        "VERPLICHT: als referentie_afbeelding een bestandsnaam is (niet 'geen'), bevat de prompt: "
+        "(a) de tag '[Product vanuit {BESTANDSNAAM}]' vroeg in de prompt, waarbij {BESTANDSNAAM} de exacte waarde "
+        "van referentie_afbeelding is — dit vertelt de AI-generator welk object te isoleren; "
+        "(b) de zin 'Integrated with the product and style from {BESTANDSNAAM}'. "
+        "Als de afbeelding meerdere producten kan bevatten, voeg dan toe: "
+        "'Focus op: [het meest prominente product] uit de afbeelding' — beschrijf het product specifiek "
+        "(kleur, materiaal, vorm) zodat er geen ambiguïteit is. "
+        "Als referentie_afbeelding 'geen' is, schrijf: "
         "'No specific product reference needed — focus on the vibe and human interaction described in the briefing.' "
         "Als het concept product-gericht is: benadruk productdetails, textuur en materiaal. "
         "Als het concept service- of sfeer-gericht is: focus op menselijke interactie en emotie. "
@@ -1318,55 +1323,113 @@ if "results" in st.session_state:
             st.divider()
 
             for concept in concepts:
-                nummer     = concept.get("nummer", "?")
-                titel      = concept.get("titel", "Zonder titel")
-                prioriteit = concept.get("prioriteit", "—")
-                impact     = concept.get("verwachte_impact", "—")
-                hook       = concept.get("hook", "—")
-                body       = concept.get("primary_text", "—")
-                headline   = concept.get("headline", "—")
-                visual     = concept.get("visuele_omschrijving", "—")
+                nummer         = concept.get("nummer", "?")
+                titel          = concept.get("titel", "Zonder titel")
+                prioriteit     = concept.get("prioriteit", "—")
+                impact         = concept.get("verwachte_impact", "—")
+                hook           = concept.get("hook", "—")
+                body           = concept.get("primary_text", "—")
+                headline       = concept.get("headline", "—")
+                visual         = concept.get("visuele_omschrijving", "—")
+                master_prompt  = concept.get("master_prompt", "")
+                design_strategy = concept.get("design_strategy", "")
+                ref_img        = concept.get("referentie_afbeelding", "")
+                ref_is_file    = bool(ref_img and ref_img.lower() != "geen")
 
-                bg_col, txt_col = PRIORITY_COLOURS.get(prioriteit, ("#6c757d", "#fff"))
+                prio_cfg       = PRIORITY_COLOURS.get(prioriteit, ("#6c757d", "#fff", prioriteit))
+                bg_col, txt_col, badge_label = prio_cfg
 
                 with st.container(border=True):
-                    # Header row
+                    # ── Header: concept name + priority badge ──────────────────
                     head_left, head_right = st.columns([3, 1])
                     with head_left:
                         st.markdown(f"#### Concept {nummer}: {titel}")
                     with head_right:
                         st.markdown(
-                            f"<div style='text-align:right'>"
+                            f"<div style='text-align:right;margin-top:6px'>"
                             f"<span style='background:{bg_col};color:{txt_col};"
-                            f"padding:4px 12px;border-radius:20px;font-size:0.8rem;"
-                            f"font-weight:600;letter-spacing:0.04em'>"
-                            f"● {prioriteit.upper()} PRIORITEIT</span></div>",
+                            f"padding:5px 14px;border-radius:20px;font-size:0.78rem;"
+                            f"font-weight:700;letter-spacing:0.05em;display:inline-block'>"
+                            f"● {prioriteit.upper()}</span><br>"
+                            f"<span style='font-size:0.72rem;color:{bg_col};font-weight:600;"
+                            f"letter-spacing:0.04em'>{badge_label}</span>"
+                            f"</div>",
                             unsafe_allow_html=True,
                         )
 
-                    # Impact banner
+                    # ── Strategic ratio banner ─────────────────────────────────
                     st.markdown(
                         f"<div style='background:#edfaf3;border-left:4px solid #33B784;"
-                        f"padding:8px 14px;border-radius:4px;margin:4px 0 12px 0;"
-                        f"font-size:0.9rem'>💡 <strong>Verwachte impact:</strong> {impact}</div>",
+                        f"padding:8px 14px;border-radius:4px;margin:4px 0 14px 0;"
+                        f"font-size:0.9rem'>💡 <strong>Strategische Ratio:</strong> {impact}</div>",
                         unsafe_allow_html=True,
                     )
 
-                    # Copy fields
-                    col_copy, col_visual = st.columns([1, 1])
+                    # ── Main 2-column layout: LEFT thumbnail | RIGHT content ───
+                    col_left, col_right = st.columns([1, 2])
 
-                    with col_copy:
-                        st.markdown("**✏️ Advertentieteksten**")
+                    with col_left:
+                        # Thumbnail of the reference image
+                        if ref_is_file:
+                            thumb_bytes = image_bytes_map.get(ref_img)
+                            if thumb_bytes:
+                                st.image(thumb_bytes, use_container_width=True)
+                            st.markdown(
+                                f"<div style='background:#fff3cd;border:1px solid #ffc107;"
+                                f"border-radius:6px;padding:6px 10px;margin-top:6px;"
+                                f"font-size:0.78rem;word-break:break-all'>"
+                                f"🖼️ <strong>Referentie:</strong><br><code>{ref_img}</code></div>",
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                "<div style='background:#f8f9fa;border:1px solid #dee2e6;"
+                                "border-radius:8px;padding:14px;font-size:0.82rem;"
+                                "color:#6c757d;text-align:center;min-height:120px;"
+                                "display:flex;align-items:center;justify-content:center'>"
+                                "🖼️<br><em>Geen product-referentie — focus op de vibe</em></div>",
+                                unsafe_allow_html=True,
+                            )
+
+                    with col_right:
+                        # Concept naam + design strategy
+                        if design_strategy:
+                            st.markdown(
+                                f"<div style='background:#f5faf7;border-left:3px solid #00573C;"
+                                f"padding:8px 12px;border-radius:4px;margin-bottom:10px;"
+                                f"font-size:0.85rem;color:#1a3a2a'>"
+                                f"<strong>Design Strategy:</strong> {design_strategy}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                        # Master Prompt box
                         st.markdown(
-                            f"<div style='background:#fff8e1;border-radius:6px;padding:10px 14px;margin-bottom:8px'>"
-                            f"<span style='font-size:0.75rem;font-weight:700;color:#b7791f;"
+                            "<div style='font-size:0.78rem;font-weight:700;color:#00573C;"
+                            "letter-spacing:0.05em;text-transform:uppercase;margin-bottom:4px'>"
+                            "🎨 Master Prompt</div>",
+                            unsafe_allow_html=True,
+                        )
+                        if master_prompt:
+                            st.code(master_prompt, language=None)
+                        st.caption(
+                            "Copy-paste this into Nano Banana Pro / Freepik — "
+                            "upload the reference image on the left first."
+                        )
+
+                    # ── Copy text fields (full width, collapsible) ─────────────
+                    with st.expander("✏️ Advertentieteksten (Hook · Primary Text · Headline)"):
+                        st.markdown(
+                            f"<div style='background:#fff8e1;border-radius:6px;"
+                            f"padding:10px 14px;margin-bottom:8px'>"
+                            f"<span style='font-size:0.72rem;font-weight:700;color:#b7791f;"
                             f"letter-spacing:0.06em;text-transform:uppercase'>Hook</span><br>"
                             f"<span style='font-size:1rem'>{hook}</span></div>",
                             unsafe_allow_html=True,
                         )
                         st.markdown(
-                            f"<div style='background:#f8f9fa;border-radius:6px;padding:10px 14px;margin-bottom:4px'>"
-                            f"<span style='font-size:0.75rem;font-weight:700;color:#495057;"
+                            f"<div style='background:#f8f9fa;border-radius:6px;"
+                            f"padding:10px 14px;margin-bottom:4px'>"
+                            f"<span style='font-size:0.72rem;font-weight:700;color:#495057;"
                             f"letter-spacing:0.06em;text-transform:uppercase'>Primary Text</span><br>"
                             f"<span style='font-size:0.9rem'>{body}</span></div>",
                             unsafe_allow_html=True,
@@ -1374,75 +1437,20 @@ if "results" in st.session_state:
                         clipboard_button(body, key=f"pt_{nummer}")
                         st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
                         st.markdown(
-                            f"<div style='background:#e8f4fd;border-radius:6px;padding:10px 14px;margin-bottom:4px'>"
-                            f"<span style='font-size:0.75rem;font-weight:700;color:#1a6ca8;"
+                            f"<div style='background:#e8f4fd;border-radius:6px;"
+                            f"padding:10px 14px;margin-bottom:4px'>"
+                            f"<span style='font-size:0.72rem;font-weight:700;color:#1a6ca8;"
                             f"letter-spacing:0.06em;text-transform:uppercase'>Headline</span><br>"
                             f"<span style='font-size:1rem;font-weight:600'>{headline}</span></div>",
                             unsafe_allow_html=True,
                         )
                         clipboard_button(headline, key=f"hl_{nummer}")
 
-                    with col_visual:
-                        st.markdown("**🎨 Visuele Briefing**")
-                        st.markdown(
-                            f"<div style='background:#f3f0ff;border-radius:6px;padding:12px 14px;"
-                            f"min-height:160px;font-size:0.88rem;line-height:1.6'>"
-                            f"<span style='font-size:0.75rem;font-weight:700;color:#6b46c1;"
-                            f"letter-spacing:0.06em;text-transform:uppercase'>Art Direction</span><br><br>"
-                            f"{visual}</div>",
-                            unsafe_allow_html=True,
-                        )
+                    # ── Art direction (full width, collapsible) ────────────────
+                    with st.expander("🎨 Art Direction Briefing"):
+                        st.markdown(visual)
 
-                    # Master Prompt section — full width below the two columns
-                    master_prompt        = concept.get("master_prompt", "")
-                    design_strategy      = concept.get("design_strategy", "")
-                    ref_img              = concept.get("referentie_afbeelding", "")
-                    ref_is_file          = ref_img and ref_img.lower() != "geen"
-
-                    st.markdown(
-                        "<div style='margin-top:16px;margin-bottom:6px'>"
-                        "<span style='font-size:0.82rem;font-weight:700;color:#00573C;"
-                        "letter-spacing:0.04em'>🎨 Visueel Concept &amp; Master Prompt</span>"
-                        "</div>",
-                        unsafe_allow_html=True,
-                    )
-
-                    # Reference image badge + thumbnail
-                    if ref_is_file:
-                        ref_col, thumb_col = st.columns([3, 1])
-                        with ref_col:
-                            st.markdown(
-                                f"<div style='background:#fff3cd;border:1px solid #ffc107;"
-                                f"border-radius:8px;padding:8px 14px;margin-bottom:8px;"
-                                f"font-size:0.88rem'>"
-                                f"🖼️ <strong>Referentie-afbeelding:</strong> "
-                                f"<code>{ref_img}</code></div>",
-                                unsafe_allow_html=True,
-                            )
-                        with thumb_col:
-                            thumb_bytes = image_bytes_map.get(ref_img)
-                            if thumb_bytes:
-                                st.image(thumb_bytes, width=100)
-                    elif ref_img:
-                        st.markdown(
-                            "<div style='background:#f8f9fa;border:1px solid #dee2e6;"
-                            "border-radius:8px;padding:8px 14px;margin-bottom:8px;"
-                            "font-size:0.88rem;color:#6c757d'>"
-                            "🖼️ <em>Geen specifieke product-referentie nodig — "
-                            "focus op de vibe van de briefing.</em></div>",
-                            unsafe_allow_html=True,
-                        )
-
-                    if design_strategy:
-                        st.markdown(
-                            f"<div style='background:#edfaf3;border-left:4px solid #33B784;"
-                            f"padding:8px 14px;border-radius:4px;margin-bottom:8px;"
-                            f"font-size:0.88rem;color:#1a3a2a'>"
-                            f"<strong>Design Strategy:</strong> {design_strategy}</div>",
-                            unsafe_allow_html=True,
-                        )
-                    if master_prompt:
-                        st.code(master_prompt, language=None)
+                st.divider()
 
             st.divider()
             st.download_button(
