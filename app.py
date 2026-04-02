@@ -230,6 +230,46 @@ st.markdown(
             font-weight: 700;
             letter-spacing: 0.04em;
         }
+
+        /* Briefing card containers */
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            border: 1px solid #d5e8dd !important;
+            border-radius: 14px !important;
+            background: #ffffff !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]:hover {
+            border-color: #33B784 !important;
+            box-shadow: 0 2px 12px rgba(0,87,60,.08) !important;
+            transition: box-shadow .2s, border-color .2s;
+        }
+
+        /* Upload drop-zones */
+        [data-testid="stFileUploaderDropzone"] {
+            background: #f5faf7 !important;
+            border: 2px dashed #33B784 !important;
+            border-radius: 10px !important;
+        }
+
+        /* Popover button */
+        [data-testid="stPopover"] button {
+            background: #f5faf7 !important;
+            border: 1px solid #33B784 !important;
+            color: #00573C !important;
+            font-weight: 600 !important;
+            border-radius: 8px !important;
+            width: 100% !important;
+        }
+        [data-testid="stPopover"] button:hover {
+            background: #edfaf3 !important;
+        }
+
+        /* Hide Streamlit deploy button */
+        #MainMenu, footer, header { visibility: hidden; }
+
+        /* Subtle tab bar */
+        .stTabs [data-baseweb="tab-list"] {
+            border-bottom: 2px solid #e0ede6;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -241,36 +281,81 @@ st.markdown(
 
 with st.sidebar:
     st.markdown(
-        "<div style='padding:8px 0 4px 0'>"
-        "<span style='font-size:1.1rem;font-weight:800;color:#00573C;font-family:Rubik,sans-serif'>"
+        "<div style='padding:8px 0 6px 0'>"
+        "<span style='font-size:1.15rem;font-weight:800;color:#00573C;font-family:Rubik,sans-serif'>"
         "Online Klik</span>"
-        "<span style='font-size:0.75rem;color:#6c757d;display:block;margin-top:2px'>"
+        "<span style='font-size:0.73rem;color:#6c757d;display:block;margin-top:2px'>"
         "Meta Ads Analyser</span></div>",
         unsafe_allow_html=True,
     )
     st.divider()
-    st.markdown(
-        "**Hoe werkt het?**\n\n"
-        "1. Upload je Meta Ads CSV-export\n"
-        "2. Upload je bannerafbeeldingen\n"
-        "3. Klik op **Analyse Starten**\n\n"
-        "De AI classificeert je advertenties, analyseert de visuals "
-        "met GPT-4o en genereert 10 creatieve briefings op basis van "
-        "de winnende patronen."
-    )
-    st.divider()
-    if "results" in st.session_state:
+
+    _phase_now = st.session_state.get("phase", "UPLOAD")
+
+    if _phase_now == "UPLOAD":
+        st.markdown(
+            "**Hoe werkt het?**\n\n"
+            "1. Upload je Meta Ads CSV-export\n"
+            "2. Upload je bannerafbeeldingen\n"
+            "3. Klik op **Analyse Starten**\n\n"
+            "De AI classificeert je advertenties, analyseert de visuals "
+            "met GPT-4o en genereert 10 creatieve briefings."
+        )
+
+    elif _phase_now == "RESULTS" and "results" in st.session_state:
+        _sr = st.session_state["results"]
+
+        # ── Downloads ─────────────────────────────────────────────────────
+        st.markdown(
+            "<div style='font-size:0.72rem;font-weight:700;color:#00573C;"
+            "text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px'>"
+            "📥 Downloads</div>",
+            unsafe_allow_html=True,
+        )
+        _pdf_cached = _sr.get("pdf_bytes", b"")
+        if _pdf_cached:
+            st.download_button(
+                "📄 Download Rapport (PDF)",
+                data=_pdf_cached,
+                file_name="online_klik_analyserapport.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        st.download_button(
+            "⬇️ Download Briefings (Markdown)",
+            data=_sr.get("concepts_md", "").encode("utf-8"),
+            file_name="creatieve_briefings.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+        st.download_button(
+            "📊 Download CSV",
+            data=_sr["df"].to_csv(index=False).encode("utf-8"),
+            file_name="geclassificeerde_advertenties.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+        st.divider()
+
+        # ── Master Prompt how-to ───────────────────────────────────────────
         with st.expander("💡 Master Prompt gebruiken", expanded=False):
             st.markdown(
                 "1. Ga naar **Tab 3 → Creatieve Briefings**\n"
                 "2. Lees de **Hook**, **Primary Text** en **Headline**\n"
                 "3. Kopieer de **Master Prompt** (XML-blok)\n"
                 "4. Ga naar **[Nano Banana Pro](https://nanobananapro.com)** of **[Freepik](https://freepik.com)**\n"
-                "5. Upload de referentie-afbeelding rechts in de kaart\n"
+                "5. Klik **🖼️ Zie referentieafbeelding** in de kaart → upload die foto\n"
                 "6. Plak de prompt en genereer je visual\n\n"
-                "_De prompt zorgt dat het product naadloos geïntegreerd wordt._"
+                "_De prompt integreert je product naadloos in de nieuwe scène._"
             )
-        st.divider()
+
+        if st.button("🔄 Nieuwe analyse starten", use_container_width=True):
+            for _k in ("results", "_csv_bytes", "_csv_name", "_imgs"):
+                st.session_state.pop(_k, None)
+            st.session_state.phase = "UPLOAD"
+            st.rerun()
+
+    st.divider()
     with st.expander("🛠️ Developer Settings", expanded=False):
         api_key = st.text_input(
             "OpenAI API-sleutel",
@@ -289,8 +374,8 @@ with st.sidebar:
 # Session state
 # ---------------------------------------------------------------------------
 
-if "started" not in st.session_state:
-    st.session_state.started = False
+if "phase" not in st.session_state:
+    st.session_state.phase = "UPLOAD"
 
 # ---------------------------------------------------------------------------
 # Koptekst (always visible)
@@ -883,7 +968,7 @@ class _NamedBytesIO(BytesIO):
 # PHASE 1 — Input (uploaders + welcome screen)
 # ═══════════════════════════════════════════════════════════════════════════
 
-if not st.session_state.started and "results" not in st.session_state:
+if st.session_state.phase == "UPLOAD":
     with _main_area.container():
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         col_csv, col_img = st.columns(2)
@@ -961,14 +1046,14 @@ if not st.session_state.started and "results" not in st.session_state:
             for _img in (uploaded_images or []):
                 _img.seek(0)
                 st.session_state["_imgs"].append({"name": _img.name, "data": _img.read()})
-            st.session_state.started = True
+            st.session_state.phase = "LANCERING"
             st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PHASE 2 — Rocket animation + Analysis pipeline
 # ═══════════════════════════════════════════════════════════════════════════
 
-elif st.session_state.started and "results" not in st.session_state:
+elif st.session_state.phase == "LANCERING":
 
     with _main_area.container():
         st.markdown(_ROCKET_ANIM_HTML, unsafe_allow_html=True)
@@ -978,7 +1063,7 @@ elif st.session_state.started and "results" not in st.session_state:
     if not api_key:
         with _main_area.container():
             st.error("Voer eerst je OpenAI API-sleutel in via Developer Settings in de zijbalk.")
-        st.session_state.started = False
+        st.session_state.phase = "UPLOAD"
         st.stop()
 
     try:
@@ -990,7 +1075,7 @@ elif st.session_state.started and "results" not in st.session_state:
         imgs_data = st.session_state.get("_imgs", [])
 
         # Stap 1: CSV classificeren
-        _prog_bar.progress(8, text="📊 Campagnedata classificeren...")
+        _prog_bar.progress(6, text="📊 Campagne CSV analyseren...")
         df = load_csv_from_upload(_NamedBytesIO(csv_bytes, csv_name))
         df, metric_used = classify_ads(df)
         results["df"] = df
@@ -1009,10 +1094,10 @@ elif st.session_state.started and "results" not in st.session_state:
 
         if imgs_data:
             for i, img_info in enumerate(imgs_data):
-                pct = 15 + int(50 * (i + 1) / len(imgs_data))
+                pct = 14 + int(46 * (i + 1) / len(imgs_data))
                 _prog_bar.progress(
                     pct,
-                    text=f"🖼️ GPT-4o analyseert {i + 1}/{len(imgs_data)}: {img_info['name']}",
+                    text=f"🔬 Banner doorlichten {i + 1}/{len(imgs_data)}: {img_info['name']}",
                 )
                 fake_img = _NamedBytesIO(img_info["data"], img_info["name"])
                 name, cat = (
@@ -1046,7 +1131,7 @@ elif st.session_state.started and "results" not in st.session_state:
 
         analysis_text = ""
         if analysed:
-            _prog_bar.progress(70, text="🔍 Strategische vergelijking genereren...")
+            _prog_bar.progress(65, text="🧠 Winnende patronen identificeren...")
             try:
                 analysis_text = compare_creatives(client, high, under + avg, no_dat)
             except Exception as e:
@@ -1064,10 +1149,10 @@ elif st.session_state.started and "results" not in st.session_state:
         full_report = "\n".join(report_lines)
         results["full_report"] = full_report
 
-        # Stap 4: Concepten genereren
+        # Stap 4: Master Prompts engineeren
         concepts: List[Dict] = []
         img_filenames = [a["filename"] for a in analysed] if analysed else []
-        _prog_bar.progress(82, text="💡 10 creatieve concepten genereren...")
+        _prog_bar.progress(78, text="✍️ Master Prompts engineeren...")
         try:
             concepts = generate_concepts(client, full_report, img_filenames)
         except Exception:
@@ -1102,9 +1187,22 @@ elif st.session_state.started and "results" not in st.session_state:
             ]
         results["concepts_md"] = "\n".join(concepts_md_lines)
 
-        _prog_bar.progress(100, text="🌕 Geland! Resultaten worden geladen...")
+        # Stap 5: PDF genereren en cachen
+        _prog_bar.progress(93, text="📄 Rapport samenstellen...")
+        try:
+            results["pdf_bytes"] = generate_pdf(
+                df=df,
+                metric_used=metric_used,
+                analysed=analysed,
+                analysis_text=analysis_text,
+                concepts=concepts,
+            )
+        except Exception:
+            results["pdf_bytes"] = b""
+
+        _prog_bar.progress(100, text="🌕 Geland op de maan! Dashboard laden...")
         st.session_state["results"] = results
-        st.session_state.started = False
+        st.session_state.phase = "RESULTS"
         st.rerun()
 
     except Exception as _pipeline_err:
@@ -1115,13 +1213,13 @@ elif st.session_state.started and "results" not in st.session_state:
             )
             with st.expander("Technische details (voor de consultant)", expanded=False):
                 st.exception(_pipeline_err)
-        st.session_state.started = False
+        st.session_state.phase = "UPLOAD"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PHASE 3 — Results Dashboard
 # ═══════════════════════════════════════════════════════════════════════════
 
-elif "results" in st.session_state:
+elif st.session_state.phase == "RESULTS":
     r = st.session_state["results"]
     df: pd.DataFrame          = r["df"]
     metric_used: str          = r["metric_used"]
@@ -1244,13 +1342,6 @@ elif "results" in st.session_state:
             hide_index=True,
         )
 
-        st.download_button(
-            "⬇️ Download geclassificeerde CSV",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="geclassificeerde_advertenties.csv",
-            mime="text/csv",
-        )
-
     # ---- Tab 2: Visuele analyse ---------------------------------------------
     with tab2:
         if not analysed:
@@ -1328,31 +1419,12 @@ elif "results" in st.session_state:
                 st.markdown(analysis_txt if analysis_txt else "_(geen analyse beschikbaar)_")
 
             st.divider()
-            dl1, dl2 = st.columns(2)
-            with dl1:
-                st.download_button(
-                    "⬇️ Download analyserapport (Markdown)",
-                    data=r["full_report"].encode("utf-8"),
-                    file_name="analyserapport.md",
-                    mime="text/markdown",
-                    use_container_width=True,
-                )
-            with dl2:
-                with st.spinner("PDF voorbereiden..."):
-                    pdf_bytes = generate_pdf(
-                        df=df,
-                        metric_used=metric_used,
-                        analysed=analysed,
-                        analysis_text=analysis_txt,
-                        concepts=concepts,
-                    )
-                st.download_button(
-                    "📄 Download Rapport (PDF)",
-                    data=pdf_bytes,
-                    file_name="online_klik_analyserapport.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
+            st.download_button(
+                "⬇️ Download analyserapport (Markdown)",
+                data=r["full_report"].encode("utf-8"),
+                file_name="analyserapport.md",
+                mime="text/markdown",
+            )
 
     # ---- Tab 3: Creatieve briefings -----------------------------------------
     with tab3:
@@ -1466,8 +1538,8 @@ elif "results" in st.session_state:
 
                     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
-                    # ── Footer: Master Prompt (left) + Thumbnail (right) ────────
-                    col_prompt, col_thumb = st.columns([1.5, 1])
+                    # ── Footer: Master Prompt (left) + Reference popover (right) ─
+                    col_prompt, col_ref = st.columns([2, 1])
 
                     with col_prompt:
                         st.markdown(
@@ -1478,55 +1550,38 @@ elif "results" in st.session_state:
                         )
                         if master_prompt:
                             st.code(master_prompt, language="xml")
-                        st.caption("Copy-paste into Nano Banana Pro or Freepik, then upload the reference image →")
+                        st.caption(
+                            "Copy-paste in Nano Banana Pro of Freepik. "
+                            "Upload daarna de referentie-afbeelding →"
+                        )
 
-                    with col_thumb:
+                    with col_ref:
+                        st.markdown(
+                            "<div style='font-size:0.7rem;font-weight:700;color:#00573C;"
+                            "letter-spacing:0.07em;text-transform:uppercase;margin-bottom:8px'>"
+                            "📌 Referentie</div>",
+                            unsafe_allow_html=True,
+                        )
                         if ref_is_file:
                             thumb_bytes = image_bytes_map.get(ref_img)
-                            if thumb_bytes:
-                                st.image(
-                                    thumb_bytes,
-                                    use_container_width=True,
-                                    clamp=True,
-                                )
-                            st.markdown(
-                                f"<div style='background:#fff3cd;border:1px solid #ffc107;"
-                                f"border-radius:6px;padding:6px 10px;margin-top:6px;"
-                                f"font-size:0.74rem;word-break:break-all'>"
-                                f"🖼️ <strong>Referentie:</strong><br><code>{ref_img}</code></div>",
-                                unsafe_allow_html=True,
-                            )
+                            with st.popover("🖼️ Zie referentieafbeelding", use_container_width=True):
+                                if thumb_bytes:
+                                    st.image(thumb_bytes, use_container_width=True)
+                                st.caption(f"Upload dit bestand: **{ref_img}**")
                         else:
                             st.markdown(
                                 "<div style='background:#f8f9fa;border:1px dashed #ced4da;"
-                                "border-radius:8px;padding:28px 14px;font-size:0.82rem;"
-                                "color:#6c757d;text-align:center;height:100%'>"
-                                "🖼️<br><br><em>Geen product-referentie</em></div>",
+                                "border-radius:8px;padding:18px 10px;font-size:0.8rem;"
+                                "color:#6c757d;text-align:center'>"
+                                "🖼️<br><em>Geen referentie</em></div>",
                                 unsafe_allow_html=True,
                             )
 
                 st.divider()
 
-            st.download_button(
-                "⬇️ Download alle briefings (Markdown)",
-                data=r.get("concepts_md", "").encode("utf-8"),
-                file_name="creatieve_briefings.md",
-                mime="text/markdown",
-                use_container_width=True,
-            )
-
-    # --- Afsluitend bericht ---------------------------------------------------
-    st.divider()
     st.markdown(
-        "<div style='text-align:center;padding:24px 0 8px 0'>"
-        "<div style='font-size:2rem'>🎉</div>"
-        "<div style='font-size:1.2rem;font-weight:700;margin:8px 0 4px 0;font-family:Rubik,sans-serif;color:#00573C'>"
-        "Analyse voltooid! Je nieuwe creatives staan klaar onder de tab <em>Creatieve Briefings</em>.</div>"
-        "<div style='font-size:0.9rem;color:#6c757d'>"
-        "Kopieer een briefing, geef hem aan je ontwerper, en test de winnende formule opnieuw.</div>"
-        "</div>"
         "<div class='ok-footer'>"
-        "<strong>Team up, power up</strong><br>"
+        "<strong>Team up, power up</strong> &nbsp;·&nbsp; "
         "Authentiek onlinemarketingbureau van Zuid-Nederland"
         "</div>",
         unsafe_allow_html=True,
