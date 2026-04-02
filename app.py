@@ -371,11 +371,20 @@ with st.sidebar:
         )
 
 # ---------------------------------------------------------------------------
-# Session state
+# Session state — initialise + refresh-recovery guards
 # ---------------------------------------------------------------------------
 
 if "phase" not in st.session_state:
     st.session_state.phase = "UPLOAD"
+
+# Guard 1: pipeline finished but phase wasn't advanced (mid-rerun edge case)
+if st.session_state.phase == "LANCERING" and "results" in st.session_state:
+    st.session_state.phase = "RESULTS"
+
+# Guard 2: user refreshed during LANCERING — session memory is gone
+if st.session_state.phase == "LANCERING" and not st.session_state.get("_csv_bytes"):
+    st.session_state.phase = "UPLOAD"
+    st.session_state["_refresh_warning"] = True
 
 # ---------------------------------------------------------------------------
 # Koptekst (always visible)
@@ -632,7 +641,114 @@ def generate_concepts(
     return parsed
 
 
-def _strip_markdown(text: str) -> str:
+# ---------------------------------------------------------------------------
+# Cached API wrappers — re-runs skip the API and return from cache instantly
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _describe_image_cached(b64: str, mime: str, ad_name: str, api_key: str) -> str:
+    """GPT-4o vision call — cached 1 h by (image content, ad name)."""
+    _c = OpenAI(api_key=api_key)
+    system_msg = (
+        "Je bent een senior Meta Ads creatief strateeg. "
+        "Je geeft uitsluitend feitelijke, directe analyse. "
+        "Je antwoord begint ALTIJD direct met punt 1 — geen inleiding, geen begroeting, "
+        "geen bevestiging, geen samenvatting vooraf. Eerste karakter is '1'."
+    )
+    prompt = (
+        f"Analyseer de banneradvertentie '{ad_name}'.\n\n"
+        "1. **Hook / Headline** — Voordeel-gedreven, nieuwsgierigheidsgericht of aanbod-gebaseerd?\n"
+        "2. **Visuele Stijl** — Minimalistisch, gedurfd, lifestyle, productgericht?\n"
+        "3. **Kleurenpalet** — Dominante kleuren en de emotie die ze uitstralen.\n"
+        "4. **Productpresentatie** — Close-up, in context, flatlay?\n"
+        "5. **Persoon / Model** — Aanwezig? Uitdrukking, houding, doelgroepkenmerken.\n"
+        "6. **CTA** — Tekst en prominentie.\n"
+        "7. **Eerste Indruk** — Welk gevoel of verlangen wekt dit op? Één zin.\n\n"
+        "Gebruik opsommingstekens onder elke kop. Wees specifiek, geen inleiding."
+    )
+    response = _c.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": system_msg},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"}},
+                ],
+            },
+        ],
+        max_tokens=900,
+    )
+    return response.choices[0].message.content
+
+
+def _build_creatives_context(
+    high: List[Dict], underperformers: List[Dict], no_data: List[Dict]
+) -> str:
+    """Build the grouped-ads context string that is fed to the comparison prompt."""
+    def fmt(ads):
+        return "\n\n".join(
+            f"### {a['name']} ({CATEGORY_NL.get(a['category'], a['category'])})\n{a['description']}"
+            for a in ads
+        )
+    sections = []
+    if high:
+        sections.append("## TOP PRESTEERDERS\n" + fmt(high))
+    if underperformers:
+        sections.append("## ONDERPRESTEERDERS\n" + fmt(underperformers))
+    if no_data:
+        sections.append("## GEEN PRESTATIEDATA\n" + fmt(no_data))
+    return "\n\n---\n\n".join(sections)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _compare_creatives_cached(context: str, api_key: str) -> str:
+    """GPT-4o strategy call — cached 1 h by analysis context hash."""
+    _c = OpenAI(api_key=api_key)
+    system_msg = f"Je bent een senior Meta Ads creatief strateeg. {TONE_INSTRUCTION}"
+    prompt = (
+        "Hieronder staan visuele beschrijvingen van advertenties uit dezelfde campagne, "
+        "gegroepeerd per prestatieniveau.\n\n"
+        f"{context}\n\n---\n\n"
+        "Schrijf een strategische analyse met de volgende secties:\n\n"
+        "## 1. Waarom de Winnaar Wint\n"
+        "Benoem de specifieke creatieve keuzes die de hogere prestatie veroorzaken. "
+        "Verwijs naar advertentienamen.\n\n"
+        "## 2. Waarom de Verliezer Verliest\n"
+        "Benoem de specifieke creatieve zwaktes. Verwijs naar advertentienamen.\n\n"
+        "## 3. Het Beslissende Patroon\n"
+        "Het belangrijkste creatieve verschil in één vetgedrukte, pakkende zin.\n\n"
+        "## 4. Aanbevelingen\n"
+        "Geef 3 concrete verbeteringen:\n\n"
+        "**Aanbeveling N:** [actie]\n"
+        "**Prioriteit:** Hoog | Middel | Laag\n"
+        "**Verwachte Impact:** [waarom dit werkt]\n\n"
+        "Vermijd generiek advies."
+    )
+    response = _c.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=1400,
+    )
+    return response.choices[0].message.content
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _generate_concepts_cached(
+    analysis_report: str, filenames_tuple: tuple, api_key: str
+) -> list:
+    """GPT-4o concepts call — cached 1 h by (report, filenames) hash."""
+    return generate_concepts(
+        OpenAI(api_key=api_key), analysis_report, list(filenames_tuple)
+    )
+
+
+def _strip_markdown(text: str):
     """Remove common Markdown syntax for plain-text output (e.g. PDF)."""
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"\*(.+?)\*", r"\1", text)
@@ -970,6 +1086,14 @@ class _NamedBytesIO(BytesIO):
 
 if st.session_state.phase == "UPLOAD":
     with _main_area.container():
+        # Recovery banner — shown when a refresh wiped an in-progress LANCERING
+        if st.session_state.pop("_refresh_warning", False):
+            st.warning(
+                "⚠️ **Analyse onderbroken.** Je pagina is ververst tijdens de analyse — "
+                "de sessiedata is verloren gegaan. Upload je bestanden opnieuw om verder te gaan.",
+                icon="🔄",
+            )
+
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         col_csv, col_img = st.columns(2)
 
@@ -1055,10 +1179,28 @@ if st.session_state.phase == "UPLOAD":
 
 elif st.session_state.phase == "LANCERING":
 
-    with _main_area.container():
-        st.markdown(_ROCKET_ANIM_HTML, unsafe_allow_html=True)
-        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-        _prog_bar = st.progress(0, text="🚀 Campagnedata inladen...")
+    # ── JS: warn the user before they accidentally close/refresh ──────────────
+    components.html(
+        "<script>window.addEventListener('beforeunload',function(e){"
+        "e.preventDefault();"
+        "e.returnValue='Weet je zeker dat je de pagina wilt verlaten? Je analyse gaat verloren.';"
+        "return e.returnValue;});</script>",
+        height=0,
+    )
+
+    # ── Guard: file data gone (page was refreshed) → recovery UI ─────────────
+    if not st.session_state.get("_csv_bytes"):
+        with _main_area.container():
+            st.markdown(_ROCKET_ANIM_HTML, unsafe_allow_html=True)
+            st.warning(
+                "⚠️ **Verbinding verbroken.** De pagina is ververst tijdens de analyse. "
+                "Klik hieronder om opnieuw te uploaden.",
+                icon="🔄",
+            )
+            if st.button("← Terug naar upload", type="primary", use_container_width=True):
+                st.session_state.phase = "UPLOAD"
+                st.rerun()
+        st.stop()
 
     if not api_key:
         with _main_area.container():
@@ -1066,8 +1208,13 @@ elif st.session_state.phase == "LANCERING":
         st.session_state.phase = "UPLOAD"
         st.stop()
 
+    # ── Render rocket + progress bar ──────────────────────────────────────────
+    with _main_area.container():
+        st.markdown(_ROCKET_ANIM_HTML, unsafe_allow_html=True)
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+        _prog_bar = st.progress(0, text="🚀 Campagnedata inladen...")
+
     try:
-        client = OpenAI(api_key=api_key)
         results = {}
 
         csv_bytes = st.session_state.get("_csv_bytes", b"")
@@ -1081,7 +1228,7 @@ elif st.session_state.phase == "LANCERING":
         results["df"] = df
         results["metric_used"] = metric_used
 
-        # Stap 2: Visuele analyse
+        # Stap 2: Visuele analyse — cached per (image content × ad name)
         analysed: List[Dict] = []
         ad_col = find_column(df, AD_NAME_COLUMNS)
         perf_map: Dict[str, str] = {}
@@ -1099,7 +1246,6 @@ elif st.session_state.phase == "LANCERING":
                     pct,
                     text=f"🔬 Banner doorlichten {i + 1}/{len(imgs_data)}: {img_info['name']}",
                 )
-                fake_img = _NamedBytesIO(img_info["data"], img_info["name"])
                 name, cat = (
                     match_category(img_info["name"], perf_map)
                     if perf_map
@@ -1107,8 +1253,12 @@ elif st.session_state.phase == "LANCERING":
                 )
                 if perf_map and name in perf_map:
                     matched_count += 1
+                # Encode image → cached API call (no re-call on reruns)
+                ext  = os.path.splitext(img_info["name"])[1].lower()
+                mime = "image/jpeg" if ext in (".jpg", ".jpeg") else f"image/{ext.lstrip('.')}"
+                b64  = base64.b64encode(img_info["data"]).decode("utf-8")
                 try:
-                    description = describe_image(client, fake_img, name)
+                    description = _describe_image_cached(b64, mime, name, api_key)
                 except Exception as e:
                     description = f"_(Fout bij analyseren: {e})_"
                 analysed.append({
@@ -1122,7 +1272,7 @@ elif st.session_state.phase == "LANCERING":
         results["total_images"]    = len(imgs_data)
         results["image_bytes_map"] = image_bytes_map
 
-        # Stap 3: Strategische vergelijking
+        # Stap 3: Strategische vergelijking — cached per context hash
         high   = [a for a in analysed if a["category"] == "High Performer"]
         avg    = [a for a in analysed if a["category"] == "Average"]
         under  = [a for a in analysed if a["category"] == "Underperformer"]
@@ -1133,7 +1283,8 @@ elif st.session_state.phase == "LANCERING":
         if analysed:
             _prog_bar.progress(65, text="🧠 Winnende patronen identificeren...")
             try:
-                analysis_text = compare_creatives(client, high, under + avg, no_dat)
+                context = _build_creatives_context(high, under + avg, no_dat)
+                analysis_text = _compare_creatives_cached(context, api_key)
             except Exception as e:
                 analysis_text = f"_(Kon vergelijking niet genereren: {e})_"
         results["analysis_text"] = analysis_text
@@ -1149,12 +1300,14 @@ elif st.session_state.phase == "LANCERING":
         full_report = "\n".join(report_lines)
         results["full_report"] = full_report
 
-        # Stap 4: Master Prompts engineeren
+        # Stap 4: Master Prompts engineeren — cached per (report × filenames)
         concepts: List[Dict] = []
         img_filenames = [a["filename"] for a in analysed] if analysed else []
         _prog_bar.progress(78, text="✍️ Master Prompts engineeren...")
         try:
-            concepts = generate_concepts(client, full_report, img_filenames)
+            concepts = _generate_concepts_cached(
+                full_report, tuple(img_filenames), api_key
+            )
         except Exception:
             pass  # surfaced as warning in Phase 3
         results["concepts"] = concepts
@@ -1220,6 +1373,15 @@ elif st.session_state.phase == "LANCERING":
 # ═══════════════════════════════════════════════════════════════════════════
 
 elif st.session_state.phase == "RESULTS":
+    # Warn before accidental close/refresh (user's work is only in session memory)
+    components.html(
+        "<script>window.addEventListener('beforeunload',function(e){"
+        "e.preventDefault();"
+        "e.returnValue='Weet je zeker dat je de pagina wilt verlaten? Je analyse gaat verloren.';"
+        "return e.returnValue;});</script>",
+        height=0,
+    )
+
     r = st.session_state["results"]
     df: pd.DataFrame          = r["df"]
     metric_used: str          = r["metric_used"]
