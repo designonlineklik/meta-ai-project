@@ -1552,9 +1552,21 @@ elif st.session_state.phase == "MATCHER":
                     key=_sb_key,
                     label_visibility="collapsed",
                 )
+                # Live image preview — updates instantly when dropdown changes
+                _cur_sel = st.session_state.get(_sb_key, _default_sel)
+                if _cur_sel != "(geen afbeelding)" and _cur_sel in _img_bytes_map:
+                    st.image(_img_bytes_map[_cur_sel], use_container_width=True)
+                else:
+                    st.markdown(
+                        "<div style='background:#f5f5f5;border:1px dashed #ccc;"
+                        "border-radius:6px;height:44px;display:flex;align-items:center;"
+                        "justify-content:center;font-size:0.72rem;color:#bbb'>"
+                        "geen preview</div>",
+                        unsafe_allow_html=True,
+                    )
 
             st.markdown(
-                "<hr style='margin:0;border-color:#f0f0f0'>",
+                "<hr style='margin:4px 0;border-color:#f0f0f0'>",
                 unsafe_allow_html=True,
             )
 
@@ -1591,20 +1603,19 @@ elif st.session_state.phase == "MATCHER":
         )
 
         if _confirm_btn:
-            # Store mapping as {row_index (int): selected_filename (str)}.
-            # Using row_index (not ad_name) as key means two rows with the
-            # same ad name are NEVER collapsed into one — every row is unique.
-            _final: Dict[int, str] = {}
+            # IMPORTANT: use string keys throughout — Streamlit / JSON serialisation
+            # converts int dict keys to strings when storing in session_state, so
+            # using str() from the start avoids "0" vs 0 KeyError mismatches.
+            _final: Dict[str, str] = {}
             for _row_idx, _adn, _ in _rows:
                 _sel = st.session_state.get(f"match_{_row_idx}", "(geen afbeelding)")
                 if _sel != "(geen afbeelding)":
-                    _final[_row_idx] = _sel
-            # Also store the ad_name lookup so LANCERING can resolve names.
-            _row_idx_to_name: Dict[int, str] = {
-                _row_idx: _adn for _row_idx, _adn, _ in _rows
+                    _final[str(_row_idx)] = _sel          # str key
+            _row_idx_to_name: Dict[str, str] = {
+                str(_row_idx): _adn for _row_idx, _adn, _ in _rows
             }
-            st.session_state["final_matches"]      = _final            # {row_idx: filename}
-            st.session_state["_row_idx_to_name"]   = _row_idx_to_name  # {row_idx: ad_name}
+            st.session_state["final_matches"]    = _final            # {str(row_idx): filename}
+            st.session_state["_row_idx_to_name"] = _row_idx_to_name  # {str(row_idx): ad_name}
             st.session_state.phase = "LANCERING"
             st.rerun()
 
@@ -1679,18 +1690,17 @@ elif st.session_state.phase == "LANCERING":
         match_confidences: Dict[str, float] = {}
         matched_count = 0
 
-        # final_matches is now {row_idx (int): filename (str)}.
-        # _row_idx_to_name maps row_idx → ad_name for category lookup.
-        final_matches    = st.session_state.get("final_matches", {})      # {row_idx: filename}
-        row_idx_to_name  = st.session_state.get("_row_idx_to_name", {})   # {row_idx: ad_name}
+        # final_matches:   {str(row_idx): filename}   — string keys always
+        # _row_idx_to_name: {str(row_idx): ad_name}   — string keys always
+        # Using str() consistently prevents int/str KeyErrors after session
+        # state JSON round-trips.
+        final_matches    = st.session_state.get("final_matches", {})
+        row_idx_to_name  = st.session_state.get("_row_idx_to_name", {})
 
-        # Build filename → ad_name from the row-index mapping.
-        # If two rows had the same ad name, each gets its own row_idx key —
-        # no collision. The last assignment wins for filename→name lookup
-        # (acceptable since the same filename can only be matched once).
+        # Build filename → ad_name. Both dicts have str keys; coerce for safety.
         filename_to_ad: Dict[str, str] = {}
         for _ridx, _fn in final_matches.items():
-            _adn = row_idx_to_name.get(int(_ridx), "")
+            _adn = row_idx_to_name.get(str(_ridx), "")
             if _adn:
                 filename_to_ad[_fn] = _adn
 
@@ -1996,14 +2006,47 @@ elif st.session_state.phase == "RESULTS":
         st.divider()
 
         display_cols = [c for c in df.columns if c != "performance_category"] + ["performance_category"]
+
+        # Build ad_name → base64 data URI from matched images so we can show
+        # thumbnails directly in the dataframe.
+        _ad_to_img_uri: Dict[str, str] = {}
+        for _ad_info in analysed:
+            _fn  = _ad_info.get("filename", "")
+            _nm  = _ad_info.get("name", "")
+            _raw = image_bytes_map.get(_fn, b"")
+            if _fn and _nm and _raw:
+                _ext  = os.path.splitext(_fn)[1].lower().lstrip(".")
+                _mime = "jpeg" if _ext in ("jpg", "jpeg") else (_ext or "jpeg")
+                _ad_to_img_uri[_nm] = f"data:image/{_mime};base64,{base64.b64encode(_raw).decode()}"
+
+        # Add a thumbnail column if we have any matched images.
+        _thumb_col = "🖼️ Banner"
+        _df_view = df[display_cols].copy()
+        if ad_col_kpi and _ad_to_img_uri:
+            _df_view.insert(
+                0, _thumb_col,
+                _df_view[ad_col_kpi].apply(
+                    lambda n: _ad_to_img_uri.get(str(n).strip(), None)
+                ),
+            )
+            _view_cols = [_thumb_col] + display_cols
+        else:
+            _view_cols = display_cols
+
+        _col_cfg = {}
+        if _thumb_col in _view_cols:
+            _col_cfg[_thumb_col] = st.column_config.ImageColumn("Banner", width="small")
+
         st.dataframe(
-            df[display_cols].style.apply(
+            _df_view[_view_cols].style.apply(
                 lambda row: [
+                    "" if c == _thumb_col else
                     colours_map.get(row["performance_category"], "") if c == "performance_category" else ""
-                    for c in display_cols
+                    for c in _view_cols
                 ],
                 axis=1,
             ),
+            column_config=_col_cfg or None,
             use_container_width=True,
             hide_index=True,
         )
