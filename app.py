@@ -364,11 +364,16 @@ with st.sidebar:
         if st.button("🔄 Opnieuw Analyseren", use_container_width=True, type="primary"):
             st.session_state.pop("results", None)
             st.session_state.pop("final_matches", None)
+            # Clear stale MATCHER selectbox values so defaults are recomputed
+            for _k in [k for k in st.session_state if k.startswith("match_")]:
+                del st.session_state[_k]
             st.session_state.phase = "MATCHER"
             st.rerun()
         if st.button("↩️ Nieuwe analyse starten", use_container_width=True):
             for _k in ("results", "_csv_bytes", "_csv_name", "_imgs", "final_matches"):
                 st.session_state.pop(_k, None)
+            for _k in [k for k in st.session_state if k.startswith("match_")]:
+                del st.session_state[_k]
             st.session_state.phase = "UPLOAD"
             st.rerun()
 
@@ -1330,8 +1335,11 @@ if st.session_state.phase == "UPLOAD":
             for _img in (uploaded_images or []):
                 _img.seek(0)
                 st.session_state["_imgs"].append({"name": _img.name, "data": _img.read()})
-            # Clear any stale matches from a previous run
+            # Clear any stale matches / selectbox keys from a previous run
             st.session_state.pop("final_matches", None)
+            st.session_state.pop("results", None)
+            for _k in [k for k in st.session_state if k.startswith("match_")]:
+                del st.session_state[_k]
             st.session_state.phase = "MATCHER"
             st.rerun()
 

@@ -36,6 +36,14 @@ CTR_COLUMNS = [
     "CTR",
 ]
 
+CPC_COLUMNS = [
+    "CPC (kosten per klik op link)",
+    "CPC (cost per link click)",
+    "CPC (all)",
+    "Cost per link click",
+    "CPC",
+]
+
 AD_NAME_COLUMNS = ["Advertentienaam", "Ad name", "ad_name", "Ad Name", "name"]
 CAMPAIGN_COLUMNS = ["Campagnenaam", "Campaign name", "campaign_name", "Campaign Name"]
 ADSET_COLUMNS = ["Naam advertentieset", "Ad set name", "adset_name", "Ad Set Name"]
@@ -68,22 +76,29 @@ def load_csv() -> pd.DataFrame:
     return df
 
 
-def classify_by_roas(value: float) -> str:
-    if value >= 3.0:
+def classify_by_roas(value: float, hi: float = 3.0, lo: float = 1.5) -> str:
+    if value >= hi:
         return "High Performer"
-    elif value >= 1.5:
+    elif value >= lo:
         return "Average"
-    else:
-        return "Underperformer"
+    return "Underperformer"
 
 
-def classify_by_ctr(value: float) -> str:
-    if value >= 2.0:
+def classify_by_ctr(value: float, hi: float = 2.0, lo: float = 1.0) -> str:
+    if value >= hi:
         return "High Performer"
-    elif value >= 1.0:
+    elif value >= lo:
         return "Average"
-    else:
-        return "Underperformer"
+    return "Underperformer"
+
+
+def classify_by_cpc(value: float, lo: float = 0.3, hi: float = 0.8) -> str:
+    """Lower CPC is better. lo/hi are the thresholds for High/Underperformer."""
+    if value <= lo:
+        return "High Performer"
+    elif value <= hi:
+        return "Average"
+    return "Underperformer"
 
 
 def clean_dutch_number(value) -> float:
@@ -160,42 +175,136 @@ REVENUE_COLUMNS = [
 ]
 
 
+def _dynamic_thresholds(series: pd.Series, multiplier_hi: float = 1.2,
+                        multiplier_lo: float = 0.8,
+                        fallback_hi: float = 3.0,
+                        fallback_lo: float = 1.5) -> Tuple[float, float, Optional[float]]:
+    """
+    Compute relative thresholds from a numeric series.
+    Returns (hi_threshold, lo_threshold, avg_or_None).
+    Falls back to the provided hardcoded values when fewer than 2 valid rows exist.
+    """
+    valid = series.dropna()
+    valid = valid[valid > 0]
+    if len(valid) >= 2:
+        avg = valid.mean()
+        return avg * multiplier_hi, avg * multiplier_lo, avg
+    return fallback_hi, fallback_lo, None
+
+
 def classify_ads(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
     """
-    Add a 'performance_category' column based on ROAS or CTR.
-    Also cleans all numeric columns (ROAS, CTR, Spend, Revenue) so the
-    Streamlit KPI cards can use them directly without re-parsing.
+    Add a 'performance_category' column to df using dynamic, data-relative thresholds.
+
+    Classification priority per row:
+      1. ROAS  — dynamic thresholds: avg*1.2 (High) / avg*0.8 (Average/Under)
+      2. CTR   — fallback when ROAS is missing/zero for that row
+      3. CPC   — fallback when both ROAS and CTR are missing/zero (lower = better)
+      4. 'No Data' — all three metrics absent
+
+    All numeric columns are cleaned from Dutch locale format (e.g. '3.597,12' → 3597.12)
+    so downstream KPI cards get plain Python floats without further parsing.
     """
     roas_col = find_column(df, ROAS_COLUMNS)
     ctr_col  = find_column(df, CTR_COLUMNS)
+    cpc_col  = find_column(df, CPC_COLUMNS)
 
+    # ── Step 1: Parse all numeric columns from Dutch/English locale ──────────
     if roas_col:
         df[roas_col] = parse_dutch_numeric(df[roas_col])
-        df["performance_category"] = df[roas_col].apply(
-            lambda v: classify_by_roas(v) if pd.notna(v) else "No Data"
-        )
-        metric_used = "ROAS (thresholds: High >= 3.0, Average >= 1.5)"
-
-    elif ctr_col:
+    if ctr_col:
+        # Strip trailing % before parsing
         df[ctr_col] = parse_dutch_numeric(
             df[ctr_col].astype(str).str.replace("%", "", regex=False)
         )
-        df["performance_category"] = df[ctr_col].apply(
-            lambda v: classify_by_ctr(v) if pd.notna(v) else "No Data"
+    if cpc_col:
+        df[cpc_col] = parse_dutch_numeric(df[cpc_col])
+    for _col in [find_column(df, SPEND_COLUMNS), find_column(df, REVENUE_COLUMNS)]:
+        if _col and _col in df.columns:
+            df[_col] = parse_dutch_numeric(df[_col])
+
+    # ── Step 2: Compute dynamic thresholds ───────────────────────────────────
+    if not roas_col and not ctr_col:
+        raise ValueError(
+            "Geen ROAS- of CTR-kolom gevonden in de CSV.\n"
+            f"Verwacht een van: {ROAS_COLUMNS + CTR_COLUMNS}\n"
+            f"Aanwezige kolommen: {list(df.columns)}"
         )
-        metric_used = "CTR (thresholds: High >= 2.0%, Average >= 1.0%)"
+
+    # ROAS thresholds (relative to dataset average)
+    roas_hi = roas_lo = roas_avg = None
+    if roas_col:
+        roas_hi, roas_lo, roas_avg = _dynamic_thresholds(
+            df[roas_col], fallback_hi=3.0, fallback_lo=1.5
+        )
+
+    # CTR thresholds (relative to dataset average; also used for row-level fallback)
+    ctr_hi = ctr_lo = None
+    if ctr_col:
+        ctr_hi, ctr_lo, _ = _dynamic_thresholds(
+            df[ctr_col], fallback_hi=2.0, fallback_lo=1.0
+        )
+
+    # CPC thresholds (relative, inverted: lower CPC = better)
+    cpc_lo_thresh = cpc_hi_thresh = None
+    if cpc_col:
+        # For CPC: "high" threshold = avg*0.8 (cheaper = High Performer)
+        #          "low"  threshold = avg*1.2 (expensive = Underperformer)
+        _cpc_hi, _cpc_lo, _cpc_avg = _dynamic_thresholds(
+            df[cpc_col], multiplier_hi=0.8, multiplier_lo=1.2,
+            fallback_hi=0.3, fallback_lo=0.8
+        )
+        cpc_lo_thresh = _cpc_hi   # below this  → High Performer
+        cpc_hi_thresh = _cpc_lo   # above this  → Underperformer
+
+    # ── Step 3: Row-level classification with fallback chain ─────────────────
+    def _classify_row(row) -> str:
+        # Primary: ROAS
+        if roas_col and roas_hi is not None:
+            v = row[roas_col]
+            if pd.notna(v) and v > 0:
+                return classify_by_roas(v, roas_hi, roas_lo)
+
+        # Secondary: CTR (when ROAS is absent/zero for this row)
+        if ctr_col and ctr_hi is not None:
+            v = row[ctr_col]
+            if pd.notna(v) and v > 0:
+                return classify_by_ctr(v, ctr_hi, ctr_lo)
+
+        # Tertiary: CPC (lower is better; when ROAS and CTR both absent)
+        if cpc_col and cpc_lo_thresh is not None:
+            v = row[cpc_col]
+            if pd.notna(v) and v > 0:
+                return classify_by_cpc(v, cpc_lo_thresh, cpc_hi_thresh)
+
+        return "No Data"
+
+    if roas_col:
+        df["performance_category"] = df.apply(_classify_row, axis=1)
+        if roas_avg is not None:
+            thresh_str = (
+                f"gem {roas_avg:.2f}x → Hoog ≥ {roas_hi:.2f}, "
+                f"Gem ≥ {roas_lo:.2f}, Laag < {roas_lo:.2f}"
+            )
+        else:
+            thresh_str = f"Hoog ≥ {roas_hi}, Gem ≥ {roas_lo}"
+        metric_used = f"ROAS (dynamisch — {thresh_str})"
 
     else:
-        raise ValueError(
-            "No ROAS or CTR column found.\n"
-            f"Expected one of: {ROAS_COLUMNS + CTR_COLUMNS}\n"
-            f"Columns in file: {list(df.columns)}"
+        # Pure CTR mode (no ROAS column in this CSV at all)
+        df["performance_category"] = df[ctr_col].apply(
+            lambda v: classify_by_ctr(v, ctr_hi, ctr_lo) if pd.notna(v) and v > 0
+            else "No Data"
         )
-
-    # Clean spend and revenue columns so downstream code gets plain floats
-    for col in [find_column(df, SPEND_COLUMNS), find_column(df, REVENUE_COLUMNS)]:
-        if col and col in df.columns:
-            df[col] = parse_dutch_numeric(df[col])
+        _, _, ctr_avg = _dynamic_thresholds(df[ctr_col], fallback_hi=2.0, fallback_lo=1.0)
+        if ctr_avg is not None:
+            thresh_str = (
+                f"gem {ctr_avg:.2f}% → Hoog ≥ {ctr_hi:.2f}%, "
+                f"Gem ≥ {ctr_lo:.2f}%"
+            )
+        else:
+            thresh_str = f"Hoog ≥ {ctr_hi}%, Gem ≥ {ctr_lo}%"
+        metric_used = f"CTR (dynamisch — {thresh_str})"
 
     return df, metric_used
 
