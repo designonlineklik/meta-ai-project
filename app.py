@@ -1384,37 +1384,53 @@ elif st.session_state.phase == "MATCHER":
             )
             st.stop()
 
-        # Build perf_map + metric value per ad
+        # ── Build display rows: every CSV row gets a unique slot ────────────────
+        # Key insight: use the DataFrame row-index (not ad-name) as the unique ID.
+        # This prevents any deduplication/merging, so each row appears exactly once.
         _m_roas_col = find_column(_m_df, ROAS_COLUMNS_KPI)
-        _m_spend_col = find_column(_m_df, SPEND_COLUMNS)
-        _priority = {"High Performer": 0, "Average": 1, "Underperformer": 2, "No Data": 3}
-        _m_seen: Dict[str, tuple] = {}
-        for _, _row in _m_df.iterrows():
-            _adn  = str(_row[_m_ad_col]).strip()
-            _cat  = _row.get("performance_category", "No Data")
-            _roas = float(_row[_m_roas_col]) if _m_roas_col and pd.notna(_row[_m_roas_col]) else 0.0
-            if _adn not in _m_seen or _roas > _m_seen[_adn][1]:
-                _m_seen[_adn] = (_cat, _roas)
+        _priority   = {"High Performer": 0, "Average": 1, "Underperformer": 2, "No Data": 3}
 
-        _sorted_ads = sorted(
-            _m_seen.items(),
-            key=lambda x: (_priority.get(x[1][0], 3), -x[1][1]),
-        )
+        _top_ads: List[tuple] = []  # (csv_row_idx: int, ad_name: str, category: str, roas: float)
+        for _row_idx, _row in _m_df.iterrows():
+            _adn = str(_row[_m_ad_col]).strip()
+            _cat = str(_row.get("performance_category", "No Data"))
 
-        # Cap at top 10 (or number of images, whichever is larger up to 10)
-        _show_n = min(10, max(len(imgs_data) if imgs_data else 5, 5))
-        _top_ads = _sorted_ads[:_show_n]
+            # Safe ROAS extraction — guards against 'actions:off', '€ ...', '-', NaN
+            _roas = 0.0
+            if _m_roas_col:
+                try:
+                    _rv = _row[_m_roas_col]
+                    if pd.notna(_rv):
+                        _roas = float(clean_dutch_number(_rv))
+                        if _roas != _roas:   # isnan check after clean_dutch_number
+                            _roas = 0.0
+                except (ValueError, TypeError):
+                    _roas = 0.0
+
+            _top_ads.append((int(_row_idx), _adn, _cat, _roas))
+
+        # Sort: High Performer first, then by ROAS descending within each tier
+        _top_ads.sort(key=lambda x: (_priority.get(x[2], 3), -x[3]))
+
+        # ── Validation: every CSV row must appear exactly once ────────────────
+        if len(_top_ads) != len(_m_df):
+            st.error(
+                f"⚠️ Validatiefout: {len(_m_df)} rijen in de CSV, maar "
+                f"{len(_top_ads)} verwerkt. Controleer de CSV op lege of ongeldige rijen."
+            )
+            st.stop()
 
         _img_names     = [img["name"] for img in imgs_data]
         _img_bytes_map = {img["name"]: img["data"] for img in imgs_data}
 
-        # Smart defaults: filename-based matching (no API)
-        _defaults: Dict[int, str] = {}
+        # Smart defaults: one image per ad row, no image used twice
+        # Keyed by csv_row_idx so the mapping survives sort-order changes
+        _defaults: Dict[int, str] = {}   # csv_row_idx → filename
         _assigned: set = set()
-        for _idx, (_adn, _) in enumerate(_top_ads):
+        for _row_idx, _adn, _, _ in _top_ads:
             _remaining = [n for n in _img_names if n not in _assigned]
             _best = _find_best_image_for_ad(_adn, _remaining)
-            _defaults[_idx] = _best or "(geen afbeelding)"
+            _defaults[_row_idx] = _best or "(geen afbeelding)"
             if _best:
                 _assigned.add(_best)
 
@@ -1452,16 +1468,17 @@ elif st.session_state.phase == "MATCHER":
             unsafe_allow_html=True,
         )
 
-        # ── Matcher rows ──────────────────────────────────────────────────────
+        # ── Matcher rows — one per unique CSV row, keyed by CSV row-index ─────
         _selectbox_opts = ["(geen afbeelding)"] + _img_names
 
-        for _idx, (_adn, (_cat, _roas)) in enumerate(_top_ads):
+        for _row_idx, _adn, _cat, _roas in _top_ads:
             _bg, _tc, _bl = _BADGE.get(_cat, _BADGE["No Data"])
-            _default_sel  = _defaults.get(_idx, "(geen afbeelding)")
+            _default_sel  = _defaults.get(_row_idx, "(geen afbeelding)")
             _default_idx  = (
                 _selectbox_opts.index(_default_sel)
                 if _default_sel in _selectbox_opts else 0
             )
+            _sb_key = f"match_{_row_idx}"   # CSV row-index, stable across re-renders
 
             _rc1, _rc2, _rc3 = st.columns([3, 3, 2])
 
@@ -1484,13 +1501,12 @@ elif st.session_state.phase == "MATCHER":
                     "Afbeelding",
                     options=_selectbox_opts,
                     index=_default_idx,
-                    key=f"match_{_idx}",
+                    key=_sb_key,
                     label_visibility="collapsed",
                 )
 
             with _rc3:
-                # Dynamic thumbnail — reads current selectbox value from session state
-                _cur_sel = st.session_state.get(f"match_{_idx}", _default_sel)
+                _cur_sel = st.session_state.get(_sb_key, _default_sel)
                 if _cur_sel != "(geen afbeelding)" and _cur_sel in _img_bytes_map:
                     st.image(_img_bytes_map[_cur_sel], use_container_width=True)
                 else:
@@ -1508,8 +1524,8 @@ elif st.session_state.phase == "MATCHER":
 
         # ── Images not yet assigned (info row) ────────────────────────────────
         _all_selected = {
-            st.session_state.get(f"match_{_i}", _defaults.get(_i, "(geen afbeelding)"))
-            for _i in range(len(_top_ads))
+            st.session_state.get(f"match_{_ridx}", _defaults.get(_ridx, "(geen afbeelding)"))
+            for _ridx, _, _, _ in _top_ads
         } - {"(geen afbeelding)"}
         _unassigned = [n for n in _img_names if n not in _all_selected]
         if _unassigned:
@@ -1541,8 +1557,8 @@ elif st.session_state.phase == "MATCHER":
 
         if _confirm_btn:
             _final: Dict[str, str] = {}
-            for _idx, (_adn, _) in enumerate(_top_ads):
-                _sel = st.session_state.get(f"match_{_idx}", "(geen afbeelding)")
+            for _row_idx, _adn, _, _ in _top_ads:
+                _sel = st.session_state.get(f"match_{_row_idx}", "(geen afbeelding)")
                 if _sel != "(geen afbeelding)":
                     _final[_adn] = _sel
             st.session_state["final_matches"] = _final
