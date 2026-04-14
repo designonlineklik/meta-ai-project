@@ -297,10 +297,22 @@ with st.sidebar:
             "**Hoe werkt het?**\n\n"
             "1. Upload je Meta Ads CSV-export\n"
             "2. Upload je bannerafbeeldingen\n"
-            "3. Klik op **Analyse Starten**\n\n"
-            "De AI classificeert je advertenties, analyseert de visuals "
-            "met GPT-4o en genereert 10 creatieve briefings."
+            "3. Koppel je banners aan de toppers\n"
+            "4. Klik op **Matches Bevestigen & Analyse Starten**\n\n"
+            "De AI classificeert je advertenties, koppelt de visuals "
+            "aan de juiste advertenties en genereert 10 creatieve briefings."
         )
+
+    elif _phase_now == "MATCHER":
+        st.markdown(
+            "**Pre-Flight Check**\n\n"
+            "De AI heeft een voorzet gemaakt op basis van je bestandsnamen. "
+            "Controleer de koppelingen, pas aan waar nodig, en bevestig.\n\n"
+            "_Geen API-aanroepen tijdens dit scherm — alles is instant._"
+        )
+        if st.button("↩️ Terug naar upload", use_container_width=True):
+            st.session_state.phase = "UPLOAD"
+            st.rerun()
 
     elif _phase_now == "RESULTS" and "results" in st.session_state:
         _sr = st.session_state["results"]
@@ -349,8 +361,13 @@ with st.sidebar:
                 "_De prompt integreert je product naadloos in de nieuwe scène._"
             )
 
-        if st.button("🔄 Nieuwe analyse starten", use_container_width=True):
-            for _k in ("results", "_csv_bytes", "_csv_name", "_imgs"):
+        if st.button("🔄 Opnieuw Analyseren", use_container_width=True, type="primary"):
+            st.session_state.pop("results", None)
+            st.session_state.pop("final_matches", None)
+            st.session_state.phase = "MATCHER"
+            st.rerun()
+        if st.button("↩️ Nieuwe analyse starten", use_container_width=True):
+            for _k in ("results", "_csv_bytes", "_csv_name", "_imgs", "final_matches"):
                 st.session_state.pop(_k, None)
             st.session_state.phase = "UPLOAD"
             st.rerun()
@@ -383,6 +400,11 @@ if st.session_state.phase == "LANCERING" and "results" in st.session_state:
 
 # Guard 2: user refreshed during LANCERING — session memory is gone
 if st.session_state.phase == "LANCERING" and not st.session_state.get("_csv_bytes"):
+    st.session_state.phase = "UPLOAD"
+    st.session_state["_refresh_warning"] = True
+
+# Guard 3: user refreshed during MATCHER — session memory is gone
+if st.session_state.phase == "MATCHER" and not st.session_state.get("_csv_bytes"):
     st.session_state.phase = "UPLOAD"
     st.session_state["_refresh_warning"] = True
 
@@ -1172,6 +1194,41 @@ def match_image_with_confidence(
         return best_fn_name, best_fn_cat, 0.0
 
 
+def _find_best_image_for_ad(ad_name: str, img_names: List[str]) -> Optional[str]:
+    """
+    Return the filename from img_names that best matches ad_name (no API calls).
+
+    Pass 1 — slug / substring containment  → return immediately
+    Pass 2 — word-overlap scoring          → return highest scorer (or None if score=0)
+    """
+    if not img_names:
+        return None
+
+    ad_lower = ad_name.lower()
+    ad_slug  = ad_lower.replace(" ", "_")
+    ad_clean = re.sub(r"[_\-]+", " ", ad_lower).strip()
+
+    # Pass 1
+    for fn in img_names:
+        stem = re.sub(r"[_\-]+", " ", os.path.splitext(fn)[0].lower()).strip()
+        if (ad_slug in fn.lower() or fn.lower() in ad_slug
+                or ad_clean in stem or stem in ad_clean):
+            return fn
+
+    # Pass 2
+    ad_tokens = {t for t in ad_clean.split() if len(t) > 2}
+    best_score, best_fn = 0, None
+    for fn in img_names:
+        stem_tokens = set(re.sub(r"[_\-]+", " ", os.path.splitext(fn)[0].lower()).split())
+        exact   = sum(2 for t in ad_tokens if t in stem_tokens)
+        partial = sum(1 for t in ad_tokens if any(t in s or s in t for s in stem_tokens))
+        score   = exact + partial
+        if score > best_score:
+            best_score, best_fn = score, fn
+
+    return best_fn if best_score > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # Shared helper: named BytesIO for reconstructed uploads
 # ---------------------------------------------------------------------------
@@ -1273,8 +1330,217 @@ if st.session_state.phase == "UPLOAD":
             for _img in (uploaded_images or []):
                 _img.seek(0)
                 st.session_state["_imgs"].append({"name": _img.name, "data": _img.read()})
+            # Clear any stale matches from a previous run
+            st.session_state.pop("final_matches", None)
+            st.session_state.phase = "MATCHER"
+            st.rerun()
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PHASE 1b — Pre-Flight Matcher
+# ═══════════════════════════════════════════════════════════════════════════
+
+elif st.session_state.phase == "MATCHER":
+
+    csv_bytes = st.session_state.get("_csv_bytes", b"")
+    csv_name  = st.session_state.get("_csv_name", "upload.csv")
+    imgs_data = st.session_state.get("_imgs", [])
+
+    with _main_area.container():
+        # ── Header ────────────────────────────────────────────────────────────
+        st.markdown(
+            "<div style='background:linear-gradient(135deg,#00573C 0%,#33B784 100%);"
+            "color:#fff;padding:20px 28px 16px;border-radius:12px;margin-bottom:20px'>"
+            "<div style='font-size:1.3rem;font-weight:800;font-family:Rubik,sans-serif'>"
+            "🛸 Pre-Flight Matcher</div>"
+            "<div style='font-size:0.85rem;opacity:.88;margin-top:4px'>"
+            "Koppel je banners aan de top-advertenties uit de CSV. "
+            "De AI heeft een voorzet gemaakt op basis van je bestandsnamen — "
+            "pas aan waar nodig en bevestig om de analyse te starten."
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Load + classify CSV (no API calls) ────────────────────────────────
+        try:
+            _m_df = load_csv_from_upload(_NamedBytesIO(csv_bytes, csv_name))
+            _m_df, _m_metric = classify_ads(_m_df)
+        except Exception as _m_err:
+            st.error(f"CSV kon niet worden ingeladen: {_m_err}")
+            st.stop()
+
+        _m_ad_col = find_column(_m_df, AD_NAME_COLUMNS)
+        if not _m_ad_col:
+            st.error(
+                "Geen advertentienaam-kolom gevonden in de CSV. "
+                "Controleer of je een originele Meta Ads Manager export gebruikt."
+            )
+            st.stop()
+
+        # Build perf_map + metric value per ad
+        _m_roas_col = find_column(_m_df, ROAS_COLUMNS_KPI)
+        _m_spend_col = find_column(_m_df, SPEND_COLUMNS)
+        _priority = {"High Performer": 0, "Average": 1, "Underperformer": 2, "No Data": 3}
+        _m_seen: Dict[str, tuple] = {}
+        for _, _row in _m_df.iterrows():
+            _adn  = str(_row[_m_ad_col]).strip()
+            _cat  = _row.get("performance_category", "No Data")
+            _roas = float(_row[_m_roas_col]) if _m_roas_col and pd.notna(_row[_m_roas_col]) else 0.0
+            if _adn not in _m_seen or _roas > _m_seen[_adn][1]:
+                _m_seen[_adn] = (_cat, _roas)
+
+        _sorted_ads = sorted(
+            _m_seen.items(),
+            key=lambda x: (_priority.get(x[1][0], 3), -x[1][1]),
+        )
+
+        # Cap at top 10 (or number of images, whichever is larger up to 10)
+        _show_n = min(10, max(len(imgs_data) if imgs_data else 5, 5))
+        _top_ads = _sorted_ads[:_show_n]
+
+        _img_names     = [img["name"] for img in imgs_data]
+        _img_bytes_map = {img["name"]: img["data"] for img in imgs_data}
+
+        # Smart defaults: filename-based matching (no API)
+        _defaults: Dict[int, str] = {}
+        _assigned: set = set()
+        for _idx, (_adn, _) in enumerate(_top_ads):
+            _remaining = [n for n in _img_names if n not in _assigned]
+            _best = _find_best_image_for_ad(_adn, _remaining)
+            _defaults[_idx] = _best or "(geen afbeelding)"
+            if _best:
+                _assigned.add(_best)
+
+        # ── Performance badge helper ───────────────────────────────────────────
+        _BADGE = {
+            "High Performer": ("#d4edda", "#155724", "🏆 Top"),
+            "Average":        ("#fff3cd", "#856404", "➡️ Gem"),
+            "Underperformer": ("#f8d7da", "#721c24", "⚠️ Laag"),
+            "No Data":        ("#e2e3e5", "#383d41", "❓ N/A"),
+        }
+
+        # ── Column headers ────────────────────────────────────────────────────
+        _hc1, _hc2, _hc3 = st.columns([3, 3, 2])
+        _hc1.markdown(
+            "<div style='font-size:0.72rem;font-weight:700;color:#00573C;"
+            "text-transform:uppercase;letter-spacing:0.06em;padding-bottom:4px'>"
+            "Advertentienaam</div>",
+            unsafe_allow_html=True,
+        )
+        _hc2.markdown(
+            "<div style='font-size:0.72rem;font-weight:700;color:#00573C;"
+            "text-transform:uppercase;letter-spacing:0.06em;padding-bottom:4px'>"
+            "Gekoppelde afbeelding</div>",
+            unsafe_allow_html=True,
+        )
+        _hc3.markdown(
+            "<div style='font-size:0.72rem;font-weight:700;color:#00573C;"
+            "text-transform:uppercase;letter-spacing:0.06em;padding-bottom:4px'>"
+            "Voorbeeld</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            "<hr style='margin:0 0 8px 0;border-color:#e0ede6'>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Matcher rows ──────────────────────────────────────────────────────
+        _selectbox_opts = ["(geen afbeelding)"] + _img_names
+
+        for _idx, (_adn, (_cat, _roas)) in enumerate(_top_ads):
+            _bg, _tc, _bl = _BADGE.get(_cat, _BADGE["No Data"])
+            _default_sel  = _defaults.get(_idx, "(geen afbeelding)")
+            _default_idx  = (
+                _selectbox_opts.index(_default_sel)
+                if _default_sel in _selectbox_opts else 0
+            )
+
+            _rc1, _rc2, _rc3 = st.columns([3, 3, 2])
+
+            with _rc1:
+                _roas_str = f"ROAS {_roas:.2f}x" if _roas > 0 else ""
+                st.markdown(
+                    f"<div style='padding:6px 0'>"
+                    f"<span style='background:{_bg};color:{_tc};padding:2px 8px;"
+                    f"border-radius:12px;font-size:0.7rem;font-weight:700;"
+                    f"margin-right:6px'>{_bl}</span>"
+                    f"<span style='font-size:0.88rem;font-weight:600;color:#111'>"
+                    f"{_adn}</span>"
+                    f"<br><span style='font-size:0.75rem;color:#888'>{_roas_str}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            with _rc2:
+                st.selectbox(
+                    "Afbeelding",
+                    options=_selectbox_opts,
+                    index=_default_idx,
+                    key=f"match_{_idx}",
+                    label_visibility="collapsed",
+                )
+
+            with _rc3:
+                # Dynamic thumbnail — reads current selectbox value from session state
+                _cur_sel = st.session_state.get(f"match_{_idx}", _default_sel)
+                if _cur_sel != "(geen afbeelding)" and _cur_sel in _img_bytes_map:
+                    st.image(_img_bytes_map[_cur_sel], use_container_width=True)
+                else:
+                    st.markdown(
+                        "<div style='background:#f5f5f5;border:1px dashed #ccc;"
+                        "border-radius:6px;height:52px;display:flex;align-items:center;"
+                        "justify-content:center;font-size:0.75rem;color:#aaa'>geen</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown(
+                "<hr style='margin:2px 0;border-color:#f0f0f0'>",
+                unsafe_allow_html=True,
+            )
+
+        # ── Images not yet assigned (info row) ────────────────────────────────
+        _all_selected = {
+            st.session_state.get(f"match_{_i}", _defaults.get(_i, "(geen afbeelding)"))
+            for _i in range(len(_top_ads))
+        } - {"(geen afbeelding)"}
+        _unassigned = [n for n in _img_names if n not in _all_selected]
+        if _unassigned:
+            st.markdown(
+                f"<div style='background:#fff8e1;border:1px solid #f59e0b;"
+                f"border-radius:8px;padding:10px 14px;font-size:0.82rem;color:#7c5a00;"
+                f"margin-top:8px'>ℹ️ <strong>{len(_unassigned)} afbeelding(en) "
+                f"nog niet gekoppeld:</strong> "
+                f"{', '.join(_unassigned)}</div>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+        if not api_key:
+            st.warning(
+                "⚠️ Voer eerst je OpenAI API-sleutel in via **Developer Settings** "
+                "in de zijbalk voor je de analyse start.",
+                icon="🔑",
+            )
+
+        # ── Confirm button ─────────────────────────────────────────────────────
+        _confirm_btn = st.button(
+            "✅ Matches bevestigen & Analyse starten",
+            type="primary",
+            use_container_width=True,
+            disabled=(not api_key),
+        )
+
+        if _confirm_btn:
+            _final: Dict[str, str] = {}
+            for _idx, (_adn, _) in enumerate(_top_ads):
+                _sel = st.session_state.get(f"match_{_idx}", "(geen afbeelding)")
+                if _sel != "(geen afbeelding)":
+                    _final[_adn] = _sel
+            st.session_state["final_matches"] = _final
             st.session_state.phase = "LANCERING"
             st.rerun()
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PHASE 2 — Rocket animation + Analysis pipeline
@@ -1331,7 +1597,7 @@ elif st.session_state.phase == "LANCERING":
         results["df"] = df
         results["metric_used"] = metric_used
 
-        # Stap 2: Visuele analyse + semantische koppeling (twee passes)
+        # Stap 2: Visuele analyse — gebruik bevestigde matches uit MATCHER
         analysed: List[Dict] = []
         ad_col = find_column(df, AD_NAME_COLUMNS)
         perf_map: Dict[str, str] = {}
@@ -1344,15 +1610,21 @@ elif st.session_state.phase == "LANCERING":
         match_confidences: Dict[str, float] = {}
         matched_count = 0
 
-        if imgs_data:
-            total_imgs = len(imgs_data)
+        # Invert final_matches (ad_name → filename) to filename → ad_name
+        final_matches   = st.session_state.get("final_matches", {})
+        filename_to_ad  = {v: k for k, v in final_matches.items()}
 
-            # Sub-stap 2a: vision pre-processing — visuele keywords extraheren (detail=low)
-            for i, img_info in enumerate(imgs_data):
-                pct = 8 + int(18 * (i + 1) / total_imgs)
+        if imgs_data:
+            total_imgs       = len(imgs_data)
+            confirmed_fnames = set(filename_to_ad.keys())
+            unconfirmed      = [img for img in imgs_data if img["name"] not in confirmed_fnames]
+
+            # Sub-stap 2a: keyword-extractie ALLEEN voor niet-bevestigde afbeeldingen
+            for i, img_info in enumerate(unconfirmed):
+                pct = 8 + int(18 * (i + 1) / max(len(unconfirmed), 1))
                 _prog_bar.progress(
                     pct,
-                    text=f"👁️ Visuele keywords extraheren {i + 1}/{total_imgs}: {img_info['name']}",
+                    text=f"👁️ Visuele keywords extraheren {i + 1}/{len(unconfirmed)}: {img_info['name']}",
                 )
                 ext  = os.path.splitext(img_info["name"])[1].lower()
                 mime = "image/jpeg" if ext in (".jpg", ".jpeg") else f"image/{ext.lstrip('.')}"
@@ -1364,26 +1636,35 @@ elif st.session_state.phase == "LANCERING":
                 image_keywords_map[img_info["name"]] = kw_data
                 image_bytes_map[img_info["name"]]    = img_info["data"]
 
-            # Sub-stap 2b: semantische koppeling + visuele beschrijving (detail=high)
+            # Sub-stap 2b: visuele beschrijving voor alle afbeeldingen
             for i, img_info in enumerate(imgs_data):
                 pct = 26 + int(34 * (i + 1) / total_imgs)
                 _prog_bar.progress(
                     pct,
                     text=f"🔬 Banner doorlichten {i + 1}/{total_imgs}: {img_info['name']}",
                 )
-                img_kw = image_keywords_map.get(img_info["name"], {})
-                if perf_map:
-                    name, cat, confidence = match_image_with_confidence(
-                        img_info["name"], img_kw, perf_map
-                    )
-                else:
-                    name, cat, confidence = img_info["name"], "No Data", 0.0
+                fn = img_info["name"]
+                image_bytes_map[fn] = img_info["data"]
 
-                match_confidences[img_info["name"]] = confidence
+                if fn in filename_to_ad:
+                    # Bevestigde koppeling uit MATCHER — altijd vertrouwbaar
+                    name       = filename_to_ad[fn]
+                    cat        = perf_map.get(name, "No Data")
+                    confidence = 1.0
+                    img_kw     = {}
+                else:
+                    # Niet bevestigd — gebruik semantische koppeling als fallback
+                    img_kw = image_keywords_map.get(fn, {})
+                    if perf_map:
+                        name, cat, confidence = match_image_with_confidence(fn, img_kw, perf_map)
+                    else:
+                        name, cat, confidence = fn, "No Data", 0.0
+
+                match_confidences[fn] = confidence
                 if perf_map and confidence > 0 and name in perf_map:
                     matched_count += 1
 
-                ext  = os.path.splitext(img_info["name"])[1].lower()
+                ext  = os.path.splitext(fn)[1].lower()
                 mime = "image/jpeg" if ext in (".jpg", ".jpeg") else f"image/{ext.lstrip('.')}"
                 b64  = base64.b64encode(img_info["data"]).decode("utf-8")
                 try:
@@ -1392,7 +1673,7 @@ elif st.session_state.phase == "LANCERING":
                     description = f"_(Fout bij analyseren: {e})_"
                 analysed.append({
                     "name":         name,
-                    "filename":     img_info["name"],
+                    "filename":     fn,
                     "category":     cat,
                     "description":  description,
                     "confidence":   confidence,
