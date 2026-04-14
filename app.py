@@ -362,12 +362,12 @@ with st.sidebar:
             )
 
         if st.button("🔄 Opnieuw Analyseren", use_container_width=True, type="primary"):
-            st.session_state.pop("results", None)
-            st.session_state.pop("final_matches", None)
-            # Clear stale MATCHER selectbox values so defaults are recomputed
-            for _k in [k for k in st.session_state if k.startswith("match_")]:
-                del st.session_state[_k]
-            st.session_state.phase = "MATCHER"
+            # Full state wipe — clears CSV, images, matches, and results so the
+            # user gets a completely fresh start with no stale data carry-over.
+            _keep_keys = set()   # nothing to preserve — api_key lives in env / widget
+            for _k in [k for k in list(st.session_state.keys()) if k not in _keep_keys]:
+                st.session_state.pop(_k, None)
+            st.session_state.phase = "UPLOAD"
             st.rerun()
         if st.button("↩️ Nieuwe analyse starten", use_container_width=True):
             for _k in ("results", "_csv_bytes", "_csv_name", "_imgs", "final_matches"):
@@ -438,24 +438,80 @@ _main_area = st.empty()
 
 def load_csv_from_upload(file) -> pd.DataFrame:
     """
-    Reads an uploaded CSV regardless of delimiter (comma, semicolon, tab)
-    or encoding (UTF-8, latin-1, cp1252). Uses sep=None + Python engine for
-    auto-detection so Meta Ads exports from any locale are handled correctly.
+    Reads an uploaded CSV with strict separator and encoding handling.
+
+    Why explicit separators instead of pure auto-detect (sep=None):
+    Meta Ads ad names commonly contain pipe characters (|), e.g.
+    "BANNER_3 | Summer | Sale". The Python CSV sniffer would mistake | for
+    the separator, producing 1 column per pipe-segment and destroying the
+    entire row structure. We therefore try comma and semicolon explicitly
+    first, only falling back to auto-detect as a last resort.
+
+    After reading:
+    - Column names are stripped of leading/trailing whitespace so that
+      Dutch export headers like ' Besteed bedrag (EUR) ' are found correctly
+      by find_column() and classify_ads().
+    - Known numeric columns are pre-cleaned from Dutch locale formatting
+      (e.g. '3.597,12' → 3597.12, '€ 1.234' → 1234.0) so that downstream
+      parse_dutch_numeric() calls in classify_ads() always receive
+      consistently typed data.
     """
     file.seek(0)
     raw = file.read()
-    for enc in ("utf-8", "latin-1", "cp1252"):
-        try:
-            return pd.read_csv(
-                BytesIO(raw),
-                sep=None,
-                engine="python",
-                encoding=enc,
-                encoding_errors="replace",
-                on_bad_lines="skip",
+
+    # Columns that carry numeric data in Dutch locale format.
+    # Only string-typed columns (dtype == object) are cleaned here —
+    # if pandas already parsed a column as float we leave it alone.
+    _NUMERIC_COLS = [
+        "Besteed bedrag (EUR)", "Besteed bedrag", "Amount spent (EUR)", "Amount spent",
+        "Aankopen", "Purchases",
+        "ROAS (rendement op advertentie-uitgaven) voor aankoop",
+        "Purchase ROAS (return on ad spend)", "ROAS",
+        "CTR (doorklikratio voor klikken op link)", "CTR (link click-through rate)",
+        "CTR (all)", "CTR",
+        "CPC (kosten per klik op link)", "CPC (cost per link click)", "CPC (all)", "CPC",
+        "Conversiewaarde van aankopen", "Purchase conversion value",
+    ]
+
+    def _read(sep, enc) -> pd.DataFrame:
+        kwargs: dict = dict(
+            encoding=enc,
+            encoding_errors="replace",
+            on_bad_lines="skip",
+        )
+        if sep is None:
+            kwargs.update(sep=None, engine="python")
+        else:
+            kwargs["sep"] = sep
+        df = pd.read_csv(BytesIO(raw), **kwargs)
+
+        # Strip whitespace from every column name immediately.
+        # Meta Ads exports often pad headers: ' Advertentienaam ', ' ROAS ', etc.
+        df.columns = df.columns.str.strip()
+
+        # Reject if we only got 1 column — wrong separator was chosen.
+        if len(df.columns) <= 1:
+            raise ValueError(
+                f"Only {len(df.columns)} column(s) parsed with sep={sep!r}/{enc} "
+                "— likely wrong separator."
             )
-        except Exception:
-            continue
+
+        # Pre-clean numeric columns that are still raw strings.
+        for _col in _NUMERIC_COLS:
+            if _col in df.columns and df[_col].dtype == object:
+                df[_col] = df[_col].apply(clean_dutch_number)
+
+        return df
+
+    # Try explicit separators first (comma → semicolon → auto-detect).
+    # This guarantees | in ad names is never confused with the CSV delimiter.
+    for enc in ("utf-8", "latin-1", "cp1252"):
+        for sep in (",", ";", None):
+            try:
+                return _read(sep, enc)
+            except Exception:
+                continue
+
     raise ValueError(
         "Het CSV-bestand kon niet worden gelezen. "
         "Gebruik a.u.b. een originele Meta Ads Manager export."
