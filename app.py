@@ -1422,6 +1422,20 @@ elif st.session_state.phase == "MATCHER":
     csv_name  = st.session_state.get("_csv_name", "upload.csv")
     imgs_data = st.session_state.get("_imgs", [])
 
+    # ── Show pipeline error banner if previous analysis failed ────────────────
+    # Error is stored by the LANCERING exception handler and consumed once here.
+    _prev_err = st.session_state.pop("_analysis_error", None)
+    if _prev_err:
+        with st.container():
+            st.error(
+                f"**Analyse mislukt** — {_prev_err}",
+                icon="❌",
+            )
+            st.caption(
+                "Controleer je API-sleutel en pas de koppelingen hieronder aan, "
+                "start dan opnieuw."
+            )
+
     with _main_area.container():
         # ── Header ────────────────────────────────────────────────────────────
         st.markdown(
@@ -1865,14 +1879,17 @@ elif st.session_state.phase == "LANCERING":
         st.rerun()
 
     except Exception as _pipeline_err:
-        with _main_area.container():
-            st.error(
-                "Oeps! Er is een fout opgetreden. "
-                "Controleer je API-sleutel en upload een geldige Meta Ads CSV."
-            )
-            with st.expander("Technische details (voor de consultant)", expanded=False):
-                st.exception(_pipeline_err)
-        st.session_state.phase = "UPLOAD"
+        # Store a short, human-readable error message and return to MATCHER
+        # so the user can adjust matches and retry without re-triggering the
+        # full pipeline on the next interaction.  (If we left phase="LANCERING"
+        # and showed an error without st.rerun(), any subsequent click would
+        # re-enter the elif phase=="LANCERING" block and restart the pipeline.)
+        _err_summary = str(_pipeline_err)
+        if len(_err_summary) > 250:
+            _err_summary = _err_summary[:247] + "…"
+        st.session_state["_analysis_error"] = _err_summary
+        st.session_state.phase = "MATCHER"
+        st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PHASE 3 — Results Dashboard
@@ -1888,12 +1905,34 @@ elif st.session_state.phase == "RESULTS":
         height=0,
     )
 
-    r = st.session_state["results"]
-    df: pd.DataFrame          = r["df"]
-    metric_used: str          = r["metric_used"]
-    analysed: List[Dict]      = r["analysed"]
+    # ── Guard: results missing (page refresh, or pipeline never completed) ─────
+    if "results" not in st.session_state or not isinstance(st.session_state.get("results"), dict):
+        with _main_area.container():
+            st.warning(
+                "De analyseresultaten zijn niet meer beschikbaar. "
+                "Dit gebeurt na een paginaverversing. Start een nieuwe analyse.",
+                icon="⚠️",
+            )
+            if st.button("← Terug naar Pre-Flight Matcher", type="primary", use_container_width=True):
+                st.session_state.phase = "MATCHER"
+                st.rerun()
+        st.stop()
+
+    r: dict                   = st.session_state["results"]
+    df: pd.DataFrame          = r.get("df")
+    metric_used: str          = r.get("metric_used", "—")
+    analysed: List[Dict]      = r.get("analysed", [])
     concepts: List[Dict]      = r.get("concepts", [])
     image_bytes_map: Dict[str, bytes] = r.get("image_bytes_map", {})
+
+    # Secondary guard: df is the minimum required to render anything useful.
+    if df is None or not isinstance(df, pd.DataFrame):
+        with _main_area.container():
+            st.error("Analysedata onvolledig. Start een nieuwe analyse.", icon="❌")
+            if st.button("← Terug naar Matcher", type="primary", use_container_width=True):
+                st.session_state.phase = "MATCHER"
+                st.rerun()
+        st.stop()
 
     with _main_area.container():
         mc = r.get("match_count", 0)
@@ -2005,51 +2044,73 @@ elif st.session_state.phase == "RESULTS":
 
         st.divider()
 
+        # ── Thumbnail strip: show matched banner for each ad above the table ──
+        # We intentionally do NOT mix Pandas Styler + ImageColumn inside a single
+        # st.dataframe() call — the combination is fragile across Streamlit versions.
+        # Instead: render thumbnails as a responsive image row, then render the
+        # styled performance table separately underneath.
+        if analysed and image_bytes_map and ad_col_kpi:
+            # Build ad_name → bytes from the MATCHER-confirmed matches
+            _ad_to_bytes: Dict[str, bytes] = {}
+            for _ai in analysed:
+                _fn  = _ai.get("filename", "")
+                _nm  = _ai.get("name", "")
+                _raw = image_bytes_map.get(_fn, b"")
+                if _fn and _nm and _raw:
+                    _ad_to_bytes[_nm] = _raw
+
+            if _ad_to_bytes:
+                st.markdown(
+                    "<div style='font-size:0.72rem;font-weight:700;color:#00573C;"
+                    "text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px'>"
+                    "Gekoppelde banners</div>",
+                    unsafe_allow_html=True,
+                )
+                # Show up to 5 thumbnails per row
+                _thumb_items = list(_ad_to_bytes.items())
+                for _chunk_start in range(0, len(_thumb_items), 5):
+                    _chunk = _thumb_items[_chunk_start:_chunk_start + 5]
+                    _tcols = st.columns(len(_chunk))
+                    for _tc, (_tnm, _traw) in zip(_tcols, _chunk):
+                        with _tc:
+                            st.image(_traw, use_container_width=True)
+                            _short = (_tnm[:22] + "…") if len(_tnm) > 22 else _tnm
+                            _tcat  = next(
+                                (a.get("category", "") for a in analysed if a.get("name") == _tnm),
+                                "",
+                            )
+                            _tc_colour = {
+                                "High Performer": "#155724",
+                                "Average":        "#856404",
+                                "Underperformer": "#721c24",
+                            }.get(_tcat, "#6c757d")
+                            st.markdown(
+                                f"<div style='font-size:0.68rem;text-align:center;"
+                                f"color:{_tc_colour};font-weight:600;margin-top:2px'>"
+                                f"{_short}</div>",
+                                unsafe_allow_html=True,
+                            )
+                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        # ── Performance table — styled by category, no image column ───────────
         display_cols = [c for c in df.columns if c != "performance_category"] + ["performance_category"]
-
-        # Build ad_name → base64 data URI from matched images so we can show
-        # thumbnails directly in the dataframe.
-        _ad_to_img_uri: Dict[str, str] = {}
-        for _ad_info in analysed:
-            _fn  = _ad_info.get("filename", "")
-            _nm  = _ad_info.get("name", "")
-            _raw = image_bytes_map.get(_fn, b"")
-            if _fn and _nm and _raw:
-                _ext  = os.path.splitext(_fn)[1].lower().lstrip(".")
-                _mime = "jpeg" if _ext in ("jpg", "jpeg") else (_ext or "jpeg")
-                _ad_to_img_uri[_nm] = f"data:image/{_mime};base64,{base64.b64encode(_raw).decode()}"
-
-        # Add a thumbnail column if we have any matched images.
-        _thumb_col = "🖼️ Banner"
-        _df_view = df[display_cols].copy()
-        if ad_col_kpi and _ad_to_img_uri:
-            _df_view.insert(
-                0, _thumb_col,
-                _df_view[ad_col_kpi].apply(
-                    lambda n: _ad_to_img_uri.get(str(n).strip(), None)
+        try:
+            st.dataframe(
+                df[display_cols].style.apply(
+                    lambda row: [
+                        colours_map.get(row["performance_category"], "")
+                        if c == "performance_category" else ""
+                        for c in display_cols
+                    ],
+                    axis=1,
                 ),
+                use_container_width=True,
+                hide_index=True,
             )
-            _view_cols = [_thumb_col] + display_cols
-        else:
-            _view_cols = display_cols
-
-        _col_cfg = {}
-        if _thumb_col in _view_cols:
-            _col_cfg[_thumb_col] = st.column_config.ImageColumn("Banner", width="small")
-
-        st.dataframe(
-            _df_view[_view_cols].style.apply(
-                lambda row: [
-                    "" if c == _thumb_col else
-                    colours_map.get(row["performance_category"], "") if c == "performance_category" else ""
-                    for c in _view_cols
-                ],
-                axis=1,
-            ),
-            column_config=_col_cfg or None,
-            use_container_width=True,
-            hide_index=True,
-        )
+        except Exception as _tbl_err:
+            # Fallback: plain table without styling if Styler fails
+            st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
+            st.caption(f"_(Stijl niet beschikbaar: {_tbl_err})_")
 
     # ---- Tab 2: Visuele analyse ---------------------------------------------
     with tab2:
@@ -2272,7 +2333,12 @@ elif st.session_state.phase == "RESULTS":
                             unsafe_allow_html=True,
                         )
                         if ref_is_file:
+                            # Primary lookup: exact filename match from matcher
                             thumb_bytes = image_bytes_map.get(ref_img)
+                            # Fallback: first available image when exact match is missing
+                            if not thumb_bytes and image_bytes_map:
+                                _fallback_fn = next(iter(image_bytes_map))
+                                thumb_bytes  = image_bytes_map[_fallback_fn]
                             with st.popover("🖼️ Zie referentieafbeelding", use_container_width=True):
                                 if thumb_bytes:
                                     st.image(thumb_bytes, use_container_width=True)
