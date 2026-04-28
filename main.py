@@ -44,6 +44,33 @@ CPC_COLUMNS = [
     "CPC",
 ]
 
+RESULTS_COLUMNS = [
+    "Resultaten",
+    "Results",
+    "Reserveringen",
+    "Reservations",
+    "Leads",
+    "Aankopen",
+    "Purchases",
+    "Conversies",
+    "Conversions",
+]
+
+LPV_COST_COLUMNS = [
+    "Kosten per weergave van bestemmingspagina",
+    "Cost per landing page view",
+    "Kosten per bestemmingspagina-weergave",
+    "Cost per LP view",
+    "Kosten per LP-weergave",
+]
+
+LPV_VOLUME_COLUMNS = [
+    "Weergaven van bestemmingspagina",
+    "Landing page views",
+    "Weergaven bestemmingspagina",
+    "LP views",
+]
+
 AD_NAME_COLUMNS = ["Advertentienaam", "Ad name", "ad_name", "Ad Name", "name"]
 CAMPAIGN_COLUMNS = ["Campagnenaam", "Campaign name", "campaign_name", "Campaign Name"]
 ADSET_COLUMNS = ["Naam advertentieset", "Ad set name", "adset_name", "Ad Set Name"]
@@ -97,6 +124,15 @@ def classify_by_cpc(value: float, lo: float = 0.3, hi: float = 0.8) -> str:
     if value <= lo:
         return "High Performer"
     elif value <= hi:
+        return "Average"
+    return "Underperformer"
+
+
+def classify_by_generic_high(value: float, hi: float, lo: float) -> str:
+    """Higher is better (results count, LP views, etc.)."""
+    if value >= hi:
+        return "High Performer"
+    elif value >= lo:
         return "Average"
     return "Underperformer"
 
@@ -196,37 +232,46 @@ def classify_ads(df: pd.DataFrame, kpi_preference: str = "ROAS") -> Tuple[pd.Dat
     """
     Add a 'performance_category' column to df using dynamic, data-relative thresholds.
 
-    kpi_preference controls which metric is weighted most heavily:
-      'ROAS' — ROAS → CTR → CPC  (default)
-      'CTR'  — CTR  → ROAS → CPC
-      'CPA'  — CPC  → ROAS → CTR  (lower CPC = better)
+    kpi_preference controls the primary metric:
+      'ROAS'    — ROAS → CTR → CPC  (default)
+      'CTR'     — CTR  → ROAS → CPC
+      'CPA'     — CPC  → ROAS → CTR  (lower = better)
+      'CPC'     — CPC  → CTR  → ROAS (lower = better)
+      'RESULTS' — Results → ROAS → CTR (higher = better)
+      'LPV'     — LPV cost → CPC → CTR (lower = better)
 
-    All numeric columns are cleaned from Dutch locale format (e.g. '3.597,12' → 3597.12)
-    so downstream KPI cards get plain Python floats without further parsing.
+    Always guarantees at least one High Performer and one Underperformer via
+    forced percentile split when normal classification yields only one category.
     """
-    roas_col = find_column(df, ROAS_COLUMNS)
-    ctr_col  = find_column(df, CTR_COLUMNS)
-    cpc_col  = find_column(df, CPC_COLUMNS)
+    roas_col    = find_column(df, ROAS_COLUMNS)
+    ctr_col     = find_column(df, CTR_COLUMNS)
+    cpc_col     = find_column(df, CPC_COLUMNS)
+    results_col = find_column(df, RESULTS_COLUMNS)
+    lpv_col     = find_column(df, LPV_COST_COLUMNS)
 
     # ── Step 1: Parse all numeric columns from Dutch/English locale ──────────
     if roas_col:
         df[roas_col] = parse_dutch_numeric(df[roas_col])
     if ctr_col:
-        # Strip trailing % before parsing
         df[ctr_col] = parse_dutch_numeric(
             df[ctr_col].astype(str).str.replace("%", "", regex=False)
         )
     if cpc_col:
         df[cpc_col] = parse_dutch_numeric(df[cpc_col])
+    if results_col:
+        df[results_col] = parse_dutch_numeric(df[results_col])
+    if lpv_col:
+        df[lpv_col] = parse_dutch_numeric(df[lpv_col])
     for _col in [find_column(df, SPEND_COLUMNS), find_column(df, REVENUE_COLUMNS)]:
         if _col and _col in df.columns:
             df[_col] = parse_dutch_numeric(df[_col])
 
     # ── Step 2: Compute dynamic thresholds ───────────────────────────────────
-    if not roas_col and not ctr_col:
+    _all_kpi_cols = [roas_col, ctr_col, cpc_col, results_col, lpv_col]
+    if not any(_all_kpi_cols):
         raise ValueError(
-            "Geen ROAS- of CTR-kolom gevonden in de CSV.\n"
-            f"Verwacht een van: {ROAS_COLUMNS + CTR_COLUMNS}\n"
+            "Geen KPI-kolom gevonden in de CSV.\n"
+            f"Verwacht een van: {ROAS_COLUMNS + CTR_COLUMNS + CPC_COLUMNS + RESULTS_COLUMNS + LPV_COST_COLUMNS}\n"
             f"Aanwezige kolommen: {list(df.columns)}"
         )
 
@@ -247,14 +292,29 @@ def classify_ads(df: pd.DataFrame, kpi_preference: str = "ROAS") -> Tuple[pd.Dat
     # CPC thresholds (relative, inverted: lower CPC = better)
     cpc_lo_thresh = cpc_hi_thresh = None
     if cpc_col:
-        # For CPC: "high" threshold = avg*0.8 (cheaper = High Performer)
-        #          "low"  threshold = avg*1.2 (expensive = Underperformer)
         _cpc_hi, _cpc_lo, _cpc_avg = _dynamic_thresholds(
             df[cpc_col], multiplier_hi=0.8, multiplier_lo=1.2,
             fallback_hi=0.3, fallback_lo=0.8
         )
-        cpc_lo_thresh = _cpc_hi   # below this  → High Performer
-        cpc_hi_thresh = _cpc_lo   # above this  → Underperformer
+        cpc_lo_thresh = _cpc_hi
+        cpc_hi_thresh = _cpc_lo
+
+    # Results thresholds (higher = better, like CTR)
+    res_hi = res_lo = None
+    if results_col:
+        res_hi, res_lo, _ = _dynamic_thresholds(
+            df[results_col], fallback_hi=10.0, fallback_lo=3.0
+        )
+
+    # LPV cost thresholds (lower = better, like CPC)
+    lpv_lo_thresh = lpv_hi_thresh = None
+    if lpv_col:
+        _lpv_hi, _lpv_lo, _ = _dynamic_thresholds(
+            df[lpv_col], multiplier_hi=0.8, multiplier_lo=1.2,
+            fallback_hi=0.30, fallback_lo=0.80
+        )
+        lpv_lo_thresh = _lpv_hi
+        lpv_hi_thresh = _lpv_lo
 
     # ── Step 3: Row-level classification with KPI-preference fallback chain ──
     def _try_roas(row):
@@ -278,11 +338,29 @@ def classify_ads(df: pd.DataFrame, kpi_preference: str = "ROAS") -> Tuple[pd.Dat
                 return classify_by_cpc(v, cpc_lo_thresh, cpc_hi_thresh)
         return None
 
+    def _try_results(row):
+        if results_col and res_hi is not None:
+            v = row[results_col]
+            if pd.notna(v) and v > 0:
+                return classify_by_generic_high(v, res_hi, res_lo)
+        return None
+
+    def _try_lpv(row):
+        if lpv_col and lpv_lo_thresh is not None:
+            v = row[lpv_col]
+            if pd.notna(v) and v > 0:
+                return classify_by_cpc(v, lpv_lo_thresh, lpv_hi_thresh)
+        return None
+
     if kpi_preference == "CTR":
         _chain = [_try_ctr, _try_roas, _try_cpc]
-    elif kpi_preference == "CPA":
+    elif kpi_preference in ("CPA", "CPC"):
         _chain = [_try_cpc, _try_roas, _try_ctr]
-    else:
+    elif kpi_preference == "RESULTS":
+        _chain = [_try_results, _try_roas, _try_ctr]
+    elif kpi_preference == "LPV":
+        _chain = [_try_lpv, _try_cpc, _try_ctr]
+    else:  # ROAS default
         _chain = [_try_roas, _try_ctr, _try_cpc]
 
     def _classify_row(row) -> str:
@@ -293,6 +371,45 @@ def classify_ads(df: pd.DataFrame, kpi_preference: str = "ROAS") -> Tuple[pd.Dat
         return "No Data"
 
     df["performance_category"] = df.apply(_classify_row, axis=1)
+
+    # ── Step 4: Forced ranking — always guarantee a High Performer + Underperformer ──
+    # Determines which column and direction to use for ranking
+    _primary_col = None
+    _higher_is_better = True
+    if kpi_preference == "RESULTS" and results_col:
+        _primary_col = results_col
+    elif kpi_preference == "LPV" and lpv_col:
+        _primary_col, _higher_is_better = lpv_col, False
+    elif kpi_preference in ("CPA", "CPC") and cpc_col:
+        _primary_col, _higher_is_better = cpc_col, False
+    elif kpi_preference == "CTR" and ctr_col:
+        _primary_col = ctr_col
+    elif roas_col:
+        _primary_col = roas_col
+    elif ctr_col:
+        _primary_col = ctr_col
+    elif cpc_col:
+        _primary_col, _higher_is_better = cpc_col, False
+
+    if _primary_col and _primary_col in df.columns:
+        _vals = df[_primary_col].copy().fillna(0)
+        _has_high  = (df["performance_category"] == "High Performer").any()
+        _has_under = (df["performance_category"] == "Underperformer").any()
+
+        if not _has_high or not _has_under:
+            # Use percentile split: top 25% → High Performer, bottom 25% → Underperformer
+            n = len(df)
+            n_split = max(1, n // 4)
+            if _higher_is_better:
+                top_idxs = _vals.nlargest(n_split).index
+                bot_idxs = _vals.nsmallest(n_split).index
+            else:
+                top_idxs = _vals.nsmallest(n_split).index  # lower cost = better
+                bot_idxs = _vals.nlargest(n_split).index
+            if not _has_high:
+                df.loc[top_idxs, "performance_category"] = "High Performer"
+            if not _has_under:
+                df.loc[bot_idxs, "performance_category"] = "Underperformer"
 
     # Build metric_used string reflecting the chosen KPI preference
     if kpi_preference == "CTR" and ctr_col:
@@ -309,6 +426,12 @@ def classify_ads(df: pd.DataFrame, kpi_preference: str = "ROAS") -> Tuple[pd.Dat
         metric_used = f"CTR — KPI-voorkeur (dynamisch — {thresh_str})"
     elif kpi_preference == "CPA" and cpc_col:
         metric_used = "CPC/CPA — KPI-voorkeur (dynamisch, lager = beter)"
+    elif kpi_preference == "CPC" and cpc_col:
+        metric_used = "CPC — KPI-voorkeur (dynamisch, lager = beter)"
+    elif kpi_preference == "RESULTS" and results_col:
+        metric_used = f"Resultaten — KPI-voorkeur (kolom: {results_col})"
+    elif kpi_preference == "LPV" and lpv_col:
+        metric_used = f"Kosten per LP-weergave — KPI-voorkeur (kolom: {lpv_col})"
     elif roas_col:
         if roas_avg is not None:
             thresh_str = (
